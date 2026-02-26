@@ -1,0 +1,381 @@
+# Master Fluorophore Spectral Database
+# Source: IF_Panel_Design_Background_Knowledge.docx Section 3.2
+# Each fluorophore has: excitation peak, emission peak, brightness, compatible lasers,
+# tandem/polymer flags, and notes.
+
+fluorophores:
+  DAPI:
+    ex_peak: 360
+    em_peak: 460
+    brightness: High
+    laser_lines: [355, 405]
+    is_tandem: false
+    is_polymer: false
+    notes: "Nuclear stain — always used as counterstain"
+
+  Hoechst 33342:
+    ex_peak: 350
+    em_peak: 461
+    brightness: High
+    laser_lines: [355, 405]
+    is_tandem: false
+    is_polymer: false
+    notes: "Live-cell compatible nuclear stain"
+
+  Pacific Blue:
+    ex_peak: 400
+    em_peak: 451
+    brightness: High
+    laser_lines: [405]
+    is_tandem: false
+    is_polymer: false
+    notes: "Bright blue; good for low-abundance targets"
+
+  BV421:
+    ex_peak: 405
+    em_peak: 421
+    brightness: Very High
+    laser_lines: [405]
+    is_tandem: false
+    is_polymer: true
+    manufacturer_family: "BioLegend BV"
+    notes: "Polymer dye — brilliant violet family"
+
+  BV510:
+    ex_peak: 405
+    em_peak: 510
+    brightness: High
+    laser_lines: [405]
+    is_tandem: true
+    is_polymer: true
+    manufacturer_family: "BioLegend BV"
+    notes: "Polymer tandem; check lot-to-lot consistency"
+
+  BV605:
+    ex_peak: 405
+    em_peak: 605
+    brightness: High
+    laser_lines: [405]
+    is_tandem: true
+    is_polymer: true
+    manufacturer_family: "BioLegend BV"
+    notes: "Orange emission excited by violet"
+
+  BV650:
+    ex_peak: 405
+    em_peak: 650
+    brightness: High
+    laser_lines: [405]
+    is_tandem: true
+    is_polymer: true
+    manufacturer_family: "BioLegend BV"
+    notes: "Deep red from violet laser"
+
+  BV711:
+    ex_peak: 405
+    em_peak: 711
+    brightness: High
+    laser_lines: [405]
+    is_tandem: true
+    is_polymer: true
+    manufacturer_family: "BioLegend BV"
+    notes: "Near-IR from violet — minimal overlap with BV650"
+
+  BV786:
+    ex_peak: 405
+    em_peak: 786
+    brightness: High
+    laser_lines: [405]
+    is_tandem: true
+    is_polymer: true
+    manufacturer_family: "BioLegend BV"
+    notes: "Very far red from violet laser"
+
+  FITC:
+    ex_peak: 490
+    em_peak: 525
+    brightness: Moderate
+    laser_lines: [488]
+    is_tandem: false
+    is_polymer: false
+    notes: "Photobleaches quickly; use for abundant targets"
+
+  Alexa Fluor 488:
+    ex_peak: 495
+    em_peak: 519
+    brightness: Very High
+    laser_lines: [488]
+    is_tandem: false
+    is_polymer: false
+    notes: "Bright, photostable upgrade to FITC"
+
+  GFP:
+    ex_peak: 488
+    em_peak: 507
+    brightness: Moderate
+    laser_lines: [488]
+    is_tandem: false
+    is_polymer: false
+    notes: "Reporter — not used with anti-GFP in same channel"
+
+  PerCP:
+    ex_peak: 482
+    em_peak: 678
+    brightness: Moderate
+    laser_lines: [488]
+    is_tandem: false
+    is_polymer: false
+    notes: "Large Stokes shift; excited by blue laser"
+
+  PerCP-Cy5.5:
+    ex_peak: 482
+    em_peak: 695
+    brightness: High
+    laser_lines: [488]
+    is_tandem: true
+    is_polymer: false
+    notes: "Tandem; bright in far red from blue laser"
+
+  PE:
+    ex_peak: 565
+    em_peak: 578
+    brightness: Very High
+    laser_lines: [488, 532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Brightest traditional fluorophore; ideal for rare targets"
+
+  PE-CF594:
+    ex_peak: 496
+    em_peak: 612
+    brightness: High
+    laser_lines: [488, 532, 561]
+    is_tandem: true
+    is_polymer: false
+    notes: "Tandem with narrow emission"
+
+  PE-Cy5:
+    ex_peak: 496
+    em_peak: 667
+    brightness: High
+    laser_lines: [488, 532, 561]
+    is_tandem: true
+    is_polymer: false
+    notes: "Tandem — can degrade over time"
+
+  PE-Cy7:
+    ex_peak: 496
+    em_peak: 785
+    brightness: High
+    laser_lines: [488, 532, 561]
+    is_tandem: true
+    is_polymer: false
+    notes: "Very far red from blue/yellow-green; high spillover into IR"
+
+  7-AAD:
+    ex_peak: 546
+    em_peak: 647
+    brightness: Moderate
+    laser_lines: [488, 532]
+    is_tandem: false
+    is_polymer: false
+    notes: "Viability dye — only enters dead cells"
+
+  Alexa Fluor 532:
+    ex_peak: 532
+    em_peak: 554
+    brightness: High
+    laser_lines: [532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Yellow-green laser optimized"
+
+  Alexa Fluor 555:
+    ex_peak: 555
+    em_peak: 565
+    brightness: High
+    laser_lines: [532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Excellent for tissue imaging"
+
+  Alexa Fluor 568:
+    ex_peak: 578
+    em_peak: 603
+    brightness: High
+    laser_lines: [561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Orange emission — good Stokes shift"
+
+  TRITC:
+    ex_peak: 550
+    em_peak: 570
+    brightness: Moderate
+    laser_lines: [532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Classic rhodamine derivative; photostable"
+
+  mCherry:
+    ex_peak: 587
+    em_peak: 610
+    brightness: Moderate
+    laser_lines: [561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Protein reporter; often used in live imaging"
+
+  Cy3:
+    ex_peak: 550
+    em_peak: 570
+    brightness: High
+    laser_lines: [532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Cyanine dye; excellent for tissue sections"
+
+  Alexa Fluor 594:
+    ex_peak: 590
+    em_peak: 617
+    brightness: High
+    laser_lines: [561, 594]
+    is_tandem: false
+    is_polymer: false
+    notes: "Good separation from AF555 and AF647"
+
+  mOrange:
+    ex_peak: 549
+    em_peak: 562
+    brightness: Moderate
+    laser_lines: [532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Fluorescent protein reporter"
+
+  Alexa Fluor 633:
+    ex_peak: 632
+    em_peak: 647
+    brightness: High
+    laser_lines: [633, 640]
+    is_tandem: false
+    is_polymer: false
+    notes: "Red laser; good for low-abundance targets"
+
+  Alexa Fluor 647:
+    ex_peak: 650
+    em_peak: 668
+    brightness: Very High
+    laser_lines: [633, 640, 647]
+    is_tandem: false
+    is_polymer: false
+    notes: "Gold standard far-red; photostable; minimal bleed"
+
+  Cy5:
+    ex_peak: 650
+    em_peak: 670
+    brightness: High
+    laser_lines: [633, 640, 647]
+    is_tandem: false
+    is_polymer: false
+    notes: "Classic far-red cyanine; widely used"
+
+  Alexa Fluor 660:
+    ex_peak: 663
+    em_peak: 690
+    brightness: High
+    laser_lines: [633, 640, 647]
+    is_tandem: false
+    is_polymer: false
+    notes: "Slightly longer emission than AF647"
+
+  Alexa Fluor 700:
+    ex_peak: 702
+    em_peak: 723
+    brightness: High
+    laser_lines: [633, 640, 680, 694]
+    is_tandem: false
+    is_polymer: false
+    notes: "Near-IR; excellent for tissue"
+
+  Alexa Fluor 750:
+    ex_peak: 749
+    em_peak: 775
+    brightness: High
+    laser_lines: [730, 750]
+    is_tandem: false
+    is_polymer: false
+    notes: "Near-IR; requires 730nm+ laser"
+
+  APC:
+    ex_peak: 650
+    em_peak: 660
+    brightness: Very High
+    laser_lines: [633, 640]
+    is_tandem: false
+    is_polymer: false
+    notes: "Bright protein fluorophore; excellent for rare cells"
+
+  APC-Cy7:
+    ex_peak: 650
+    em_peak: 785
+    brightness: High
+    laser_lines: [633, 640]
+    is_tandem: true
+    is_polymer: false
+    notes: "Tandem; can degrade — check lot validity"
+
+  APC-R700:
+    ex_peak: 650
+    em_peak: 723
+    brightness: High
+    laser_lines: [633, 640]
+    is_tandem: true
+    is_polymer: false
+    manufacturer_family: "BD Horizon"
+    notes: "BD Horizon tandem"
+
+  Cy7:
+    ex_peak: 743
+    em_peak: 767
+    brightness: Moderate
+    laser_lines: [720, 730]
+    is_tandem: false
+    is_polymer: false
+    notes: "Near-IR cyanine"
+
+  IRDye 800CW:
+    ex_peak: 778
+    em_peak: 794
+    brightness: High
+    laser_lines: [730, 785]
+    is_tandem: false
+    is_polymer: false
+    notes: "Used in Odyssey western — also IF"
+
+  SiR:
+    ex_peak: 652
+    em_peak: 674
+    brightness: Moderate
+    laser_lines: [633, 640]
+    is_tandem: false
+    is_polymer: false
+    notes: "Cell-permeable for live imaging; actin/tubulin probes"
+
+  DRAQ5:
+    ex_peak: 646
+    em_peak: 681
+    brightness: Moderate
+    laser_lines: [633, 640]
+    is_tandem: false
+    is_polymer: false
+    notes: "Nuclear stain — live or fixed; far red"
+
+  DRAQ7:
+    ex_peak: 599
+    em_peak: 694
+    brightness: Moderate
+    laser_lines: [488, 532, 561]
+    is_tandem: false
+    is_polymer: false
+    notes: "Viability dye — far red"

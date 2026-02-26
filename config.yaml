@@ -1,0 +1,32 @@
+# IF Panel Designer — Application Configuration
+lab:
+  name: "My Lab"
+  pi_name: ""
+  institution: ""
+  default_researcher: ""
+
+defaults:
+  active_profile: "Default Lab Microscope"
+  export_format: "docx"
+  output_folder: "output"
+  include_logo: false
+
+scraping:
+  enabled: true
+  cache_ttl_hours: 24
+  max_results_per_vendor: 10
+  timeout_seconds: 30
+  vendor_priority:
+    - Biocompare
+    - Abcam
+    - Cell Signaling Technology
+    - BioLegend
+    - Thermo Fisher
+    - BD Biosciences
+    - R&D Systems
+    - Sigma-Aldrich
+
+inventory:
+  low_stock_threshold_ul: 10
+  expiry_warning_days: 90
+  max_freeze_thaw_cycles: 5

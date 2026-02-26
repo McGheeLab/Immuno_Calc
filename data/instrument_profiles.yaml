@@ -1,0 +1,138 @@
+# Instrument Profile Configurations
+# Each profile defines the laser lines and detector channels available on an instrument.
+
+profiles:
+  Default Lab Microscope:
+    mode: conventional
+    channels:
+      - name: DAPI
+        laser_nm: 405
+        filter_center: 450
+        filter_bandwidth: 50
+        common_fluorophores: [DAPI, Hoechst 33342, Pacific Blue, BV421]
+
+      - name: TRITC
+        laser_nm: 561
+        filter_center: 580
+        filter_bandwidth: 30
+        common_fluorophores: [TRITC, Cy3, Alexa Fluor 555, PE]
+
+      - name: mCHERRY
+        laser_nm: 561
+        filter_center: 620
+        filter_bandwidth: 30
+        common_fluorophores: [mCherry, Alexa Fluor 594, Alexa Fluor 568, PE-CF594]
+
+      - name: CY5
+        laser_nm: 640
+        filter_center: 670
+        filter_bandwidth: 30
+        common_fluorophores: [Cy5, Alexa Fluor 647, APC, Alexa Fluor 633]
+
+      - name: "730"
+        laser_nm: 730
+        filter_center: 780
+        filter_bandwidth: 60
+        common_fluorophores: [Alexa Fluor 750, Cy7, IRDye 800CW]
+
+  Flow Cytometer (4-laser):
+    mode: conventional
+    channels:
+      - name: V450
+        laser_nm: 405
+        filter_center: 450
+        filter_bandwidth: 50
+        common_fluorophores: [DAPI, Pacific Blue, BV421]
+
+      - name: V510
+        laser_nm: 405
+        filter_center: 510
+        filter_bandwidth: 50
+        common_fluorophores: [BV510]
+
+      - name: V605
+        laser_nm: 405
+        filter_center: 605
+        filter_bandwidth: 40
+        common_fluorophores: [BV605]
+
+      - name: V650
+        laser_nm: 405
+        filter_center: 650
+        filter_bandwidth: 40
+        common_fluorophores: [BV650]
+
+      - name: B530
+        laser_nm: 488
+        filter_center: 530
+        filter_bandwidth: 30
+        common_fluorophores: [FITC, Alexa Fluor 488, GFP]
+
+      - name: B695
+        laser_nm: 488
+        filter_center: 695
+        filter_bandwidth: 40
+        common_fluorophores: [PerCP, PerCP-Cy5.5]
+
+      - name: YG578
+        laser_nm: 561
+        filter_center: 578
+        filter_bandwidth: 16
+        common_fluorophores: [PE]
+
+      - name: YG610
+        laser_nm: 561
+        filter_center: 610
+        filter_bandwidth: 20
+        common_fluorophores: [PE-CF594, mCherry]
+
+      - name: YG780
+        laser_nm: 561
+        filter_center: 780
+        filter_bandwidth: 60
+        common_fluorophores: [PE-Cy7]
+
+      - name: R660
+        laser_nm: 640
+        filter_center: 660
+        filter_bandwidth: 20
+        common_fluorophores: [APC, Alexa Fluor 647]
+
+      - name: R720
+        laser_nm: 640
+        filter_center: 720
+        filter_bandwidth: 30
+        common_fluorophores: [Alexa Fluor 700, APC-R700]
+
+      - name: R780
+        laser_nm: 640
+        filter_center: 780
+        filter_bandwidth: 60
+        common_fluorophores: [APC-Cy7]
+
+  Spectral Cytometer (Cytek Aurora):
+    mode: spectral
+    channels:
+      - name: V1-V16
+        laser_nm: 405
+        filter_center: 450
+        filter_bandwidth: 200
+        common_fluorophores: [DAPI, BV421, BV510, BV605, BV650, BV711, BV786]
+
+      - name: B1-B14
+        laser_nm: 488
+        filter_center: 570
+        filter_bandwidth: 300
+        common_fluorophores: [FITC, Alexa Fluor 488, PE, PerCP-Cy5.5]
+
+      - name: YG1-YG10
+        laser_nm: 561
+        filter_center: 620
+        filter_bandwidth: 200
+        common_fluorophores: [PE, Alexa Fluor 568, Alexa Fluor 594, PE-Cy7]
+
+      - name: R1-R8
+        laser_nm: 640
+        filter_center: 700
+        filter_bandwidth: 200
+        common_fluorophores: [APC, Alexa Fluor 647, Alexa Fluor 700, APC-Cy7]

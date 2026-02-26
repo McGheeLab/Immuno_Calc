@@ -1,0 +1,76 @@
+# Troubleshooting Knowledge Base
+# Matched to panel components for context-specific guidance
+
+problems:
+  no_signal:
+    title: "No Signal"
+    causes:
+      - "Wrong antibody dilution (too dilute)"
+      - "Antibody degraded (check storage, expiry, freeze-thaw count)"
+      - "Antigen retrieval failed or incorrect method"
+      - "Wrong secondary antibody species"
+      - "Protein not expressed in this tissue/cell type"
+      - "Incompatible fixation destroyed epitope"
+    solutions:
+      - "Titrate antibody concentration"
+      - "Check lot and expiry date"
+      - "Repeat antigen retrieval with different buffer (pH 6 vs pH 9)"
+      - "Verify secondary matches primary host species"
+      - "Run positive control tissue"
+
+  high_background:
+    title: "High Background (All Cells)"
+    causes:
+      - "Primary too concentrated"
+      - "Blocking insufficient"
+      - "Secondary cross-reactive"
+      - "Tissue autofluorescence"
+    solutions:
+      - "Increase blocking time to 2 hours or increase serum to 10%"
+      - "Dilute primary antibody further"
+      - "Use pre-adsorbed secondary antibodies"
+      - "Add Sudan Black B (0.1%) for 10 min to quench autofluorescence"
+
+  speckled_background:
+    title: "Speckled/Punctate Background"
+    causes:
+      - "Antibody aggregation"
+      - "Secondary cross-reacts with endogenous Ig"
+    solutions:
+      - "Filter antibody through 0.22µm before use"
+      - "Use Fab fragment secondaries"
+      - "Block endogenous immunoglobulins"
+
+  bleedthrough:
+    title: "Bleed-through Into Adjacent Channel"
+    causes:
+      - "Spectral spillover between fluorophores"
+      - "Too much antibody"
+    solutions:
+      - "Apply compensation/spectral unmixing"
+      - "Reduce primary concentration"
+      - "Redesign panel with lower-spillover fluorophore pairs"
+      - "Image channels sequentially"
+
+  tandem_degradation:
+    title: "Tandem Dye Signal in Donor Channel"
+    causes:
+      - "Incomplete FRET due to dye degradation"
+      - "Poor storage conditions"
+    solutions:
+      - "Check lot integrity"
+      - "Use fresh aliquot"
+      - "Verify storage at 4°C, protected from light, never frozen"
+
+  autofluorescence:
+    title: "High Cell/Tissue Autofluorescence"
+    causes:
+      - "Aldehyde fixation (PFA, glutaraldehyde)"
+      - "Dead cells"
+      - "Mitochondria-rich cells"
+      - "Lipofuscin in aged tissue"
+    solutions:
+      - "Sodium borohydride quenching (1 mg/mL, 10 min) post-fixation"
+      - "Exclude dead cells with viability dye"
+      - "Use far-red fluorophores (less autofluorescence)"
+      - "Include autofluorescence removal step"
