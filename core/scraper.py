@@ -1,420 +1,185 @@
 """
-core/scraper.py — Antibody Pricing Scraper.
+core/scraper.py — Antibody Search Interface.
 
-Pulls antibody listings and prices from Biocompare and major vendor websites.
-All requests are rate-limited, cached, and respect robots.txt.
-Falls back to cached data if a site is unreachable.
+Primary data source: local Biocompare catalog (populated by monthly batch scrape).
+Fallback: live web scraping (rate-limited) if no local catalog available.
+Manual entry always available as last resort.
 
-NOTE: This module requires network access. When unavailable, all functions
-return empty results gracefully and the manual entry fallback should be used.
+The local catalog at db/biocompare_catalog.db is populated by running:
+    python scripts/run_monthly_scrape.py
 """
 
 from __future__ import annotations
 
 import logging
-import random
-import time
 from datetime import datetime
 from typing import Optional
-from urllib.parse import quote_plus
 
 from core.models import PriceResult
 
 logger = logging.getLogger(__name__)
-
-# ─── Rate Limiting ───────────────────────────────────────────────────────────
-
-_last_request_time: dict[str, float] = {}
-MIN_DELAY_SECONDS = 2.5
-MAX_DELAY_SECONDS = 5.0
-
-# User-Agent rotation
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-]
-
-
-def _rate_limit(vendor: str):
-    """Enforce rate limiting per vendor."""
-    now = time.time()
-    last = _last_request_time.get(vendor, 0)
-    elapsed = now - last
-    delay = random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
-    if elapsed < delay:
-        time.sleep(delay - elapsed)
-    _last_request_time[vendor] = time.time()
-
-
-def _get_headers() -> dict:
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
 
 
 # ─── Main Search Function ────────────────────────────────────────────────────
 
 def search(
     query: str,
-    vendors: Optional[list[str]] = None,
-    max_results: int = 10,
-    timeout: int = 30,
+    target: str = "",
+    host: str = "",
+    application: str = "",
+    conjugate: str = "",
+    reactivity: str = "",
+    vendor: str = "",
+    max_results: int = 50,
+    db_dir: str = None,
 ) -> list[PriceResult]:
     """
-    Search for antibody products across vendors.
+    Search for antibody products. Checks local Biocompare catalog first,
+    then falls back to live scraping if catalog is empty or unavailable.
 
     Args:
-        query: Search string (e.g., "anti-CD3 human IF rabbit")
-        vendors: List of vendor names to search. None = all enabled.
-        max_results: Maximum results per vendor.
-        timeout: Request timeout in seconds.
+        query: General search string (e.g., "anti-CD3 human IF rabbit")
+        target: Target antigen name filter
+        host: Host species filter
+        application: Application filter (IF, IHC, FC, WB, etc.)
+        conjugate: Conjugate/fluorophore filter
+        reactivity: Sample species reactivity filter
+        vendor: Vendor name filter
+        max_results: Maximum results to return
+        db_dir: Path to database directory (default: auto-detect)
 
     Returns:
-        List of PriceResult objects with product details and prices.
+        List of PriceResult objects.
     """
-    if vendors is None:
-        vendors = ["Biocompare", "Abcam", "Cell Signaling Technology", "BioLegend"]
-
-    all_results: list[PriceResult] = []
-
-    vendor_scrapers = {
-        "Biocompare": _scrape_biocompare,
-        "Abcam": _scrape_abcam,
-        "Cell Signaling Technology": _scrape_cst,
-        "BioLegend": _scrape_biolegend,
-        "Thermo Fisher": _scrape_thermo,
-        "R&D Systems": _scrape_rnd,
-        "Sigma-Aldrich": _scrape_sigma,
-    }
-
-    for vendor in vendors:
-        scraper_fn = vendor_scrapers.get(vendor)
-        if scraper_fn is None:
-            logger.warning(f"No scraper implemented for {vendor}")
-            continue
-
-        try:
-            _rate_limit(vendor)
-            results = scraper_fn(query, max_results, timeout)
-            all_results.extend(results)
-        except Exception as e:
-            logger.error(f"Scraper error for {vendor}: {e}")
-            continue
-
-    return all_results
-
-
-# ─── Vendor-Specific Scrapers ────────────────────────────────────────────────
-
-def _scrape_biocompare(query: str, max_results: int, timeout: int) -> list[PriceResult]:
-    """
-    Scrape Biocompare antibody search results.
-    URL pattern: https://www.biocompare.com/pfu/110487/scp/antibodies?search=<query>
-    """
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-    except ImportError:
-        logger.warning("requests/beautifulsoup4 not installed — scraping unavailable")
-        return []
-
-    url = f"https://www.biocompare.com/pfu/110487/scp/antibodies?search={quote_plus(query)}"
     results = []
 
+    # ── Try local catalog first (instant, no network needed) ──
     try:
-        resp = requests.get(url, headers=_get_headers(), timeout=timeout)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # Parse product cards (CSS selectors may change — update as needed)
-        cards = soup.select(".product-card, .search-result-item, .product-listing")[:max_results]
-
-        for card in cards:
-            try:
-                name_el = card.select_one(".product-name, .product-title, h3, h4")
-                price_el = card.select_one(".price, .product-price")
-                vendor_el = card.select_one(".supplier, .vendor-name")
-                catalog_el = card.select_one(".catalog-number, .cat-num")
-                link_el = card.select_one("a[href]")
-
-                results.append(PriceResult(
-                    product_name=name_el.get_text(strip=True) if name_el else "",
-                    price=_parse_price(price_el.get_text(strip=True)) if price_el else 0,
-                    vendor=vendor_el.get_text(strip=True) if vendor_el else "Biocompare",
-                    catalog_no=catalog_el.get_text(strip=True) if catalog_el else "",
-                    url=link_el["href"] if link_el and link_el.get("href") else url,
-                    target=query.split()[0] if query else "",
-                    scraped_at=datetime.now(),
-                    is_cached=False,
-                ))
-            except Exception:
-                continue
-
+        results = _search_local_catalog(
+            query=query, target=target, host=host, application=application,
+            conjugate=conjugate, reactivity=reactivity, vendor=vendor,
+            max_results=max_results, db_dir=db_dir,
+        )
+        if results:
+            logger.info(f"Local catalog returned {len(results)} results for '{query}'")
+            return results
+        else:
+            logger.info(f"No local catalog results for '{query}' — catalog may be empty")
     except Exception as e:
-        logger.error(f"Biocompare scraping failed: {e}")
+        logger.warning(f"Local catalog search failed: {e}")
+
+    # ── Fallback: live scraping ──
+    logger.info("Falling back to live scraping (local catalog not available or empty)")
+    results = _live_search(query, max_results)
+    return results
+
+
+def _search_local_catalog(
+    query: str = "",
+    target: str = "",
+    host: str = "",
+    application: str = "",
+    conjugate: str = "",
+    reactivity: str = "",
+    vendor: str = "",
+    max_results: int = 50,
+    db_dir: str = None,
+) -> list[PriceResult]:
+    """Search the local Biocompare catalog database."""
+    from core.biocompare_scraper import search_local_catalog
+
+    rows = search_local_catalog(
+        query=query, target=target, host=host, application=application,
+        conjugate=conjugate, reactivity=reactivity, vendor=vendor,
+        max_results=max_results, db_dir=db_dir,
+    )
+
+    results = []
+    for row in rows:
+        # Parse applications string to list
+        apps_str = row.get("applications", "")
+        apps_list = [a.strip() for a in apps_str.replace(",", " ").split() if a.strip()] if apps_str else []
+
+        # Parse reactivity string to list
+        react_str = row.get("reactivity", "")
+        react_list = [r.strip() for r in react_str.replace(",", " ").split() if r.strip()] if react_str else []
+
+        results.append(PriceResult(
+            product_name=row.get("product_name", ""),
+            target=row.get("antigen_name", ""),
+            vendor=row.get("vendor", ""),
+            catalog_no=row.get("catalog_no", ""),
+            price=float(row.get("price", 0)),
+            package_size=row.get("package_size", ""),
+            host_species=row.get("host_species", ""),
+            isotype=row.get("isotype", ""),
+            clonality=row.get("clonality", ""),
+            conjugate=row.get("conjugate", ""),
+            validated_applications=apps_list,
+            reactivity=react_list,
+            url=row.get("detail_url", "") or row.get("supplier_url", ""),
+            scraped_at=datetime.fromisoformat(row["scraped_at"]) if row.get("scraped_at") else None,
+            is_cached=True,  # It's from local catalog
+        ))
 
     return results
 
 
-def _scrape_abcam(query: str, max_results: int, timeout: int) -> list[PriceResult]:
-    """Scrape Abcam using JSON-LD structured data."""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-        import json
-    except ImportError:
-        return []
-
-    url = f"https://www.abcam.com/en-us/search?keywords={quote_plus(query)}"
-    results = []
-
-    try:
-        resp = requests.get(url, headers=_get_headers(), timeout=timeout)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # Look for JSON-LD product data
-        scripts = soup.find_all("script", type="application/ld+json")
-        for script in scripts:
-            try:
-                data = json.loads(script.string)
-                if isinstance(data, list):
-                    for item in data[:max_results]:
-                        if item.get("@type") == "Product":
-                            offer = item.get("offers", {})
-                            results.append(PriceResult(
-                                product_name=item.get("name", ""),
-                                price=float(offer.get("price", 0)),
-                                vendor="Abcam",
-                                catalog_no=item.get("sku", ""),
-                                url=item.get("url", url),
-                                target=query.split()[0] if query else "",
-                                scraped_at=datetime.now(),
-                                is_cached=False,
-                            ))
-                elif isinstance(data, dict) and data.get("@type") == "Product":
-                    offer = data.get("offers", {})
-                    results.append(PriceResult(
-                        product_name=data.get("name", ""),
-                        price=float(offer.get("price", 0)),
-                        vendor="Abcam",
-                        catalog_no=data.get("sku", ""),
-                        url=data.get("url", url),
-                        target=query.split()[0] if query else "",
-                        scraped_at=datetime.now(),
-                        is_cached=False,
-                    ))
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-    except Exception as e:
-        logger.error(f"Abcam scraping failed: {e}")
-
-    return results[:max_results]
-
-
-def _scrape_cst(query: str, max_results: int, timeout: int) -> list[PriceResult]:
-    """Scrape Cell Signaling Technology using JSON-LD."""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-        import json
-    except ImportError:
-        return []
-
-    url = f"https://www.cellsignal.com/search?q={quote_plus(query)}"
-    results = []
-
-    try:
-        resp = requests.get(url, headers=_get_headers(), timeout=timeout)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        scripts = soup.find_all("script", type="application/ld+json")
-        for script in scripts:
-            try:
-                data = json.loads(script.string)
-                items = data if isinstance(data, list) else [data]
-                for item in items[:max_results]:
-                    if item.get("@type") == "Product":
-                        offer = item.get("offers", {})
-                        if isinstance(offer, list):
-                            offer = offer[0] if offer else {}
-                        results.append(PriceResult(
-                            product_name=item.get("name", ""),
-                            price=float(offer.get("price", 0)),
-                            vendor="Cell Signaling Technology",
-                            catalog_no=item.get("sku", ""),
-                            url=item.get("url", url),
-                            target=query.split()[0] if query else "",
-                            scraped_at=datetime.now(),
-                            is_cached=False,
-                        ))
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-    except Exception as e:
-        logger.error(f"CST scraping failed: {e}")
-
-    return results[:max_results]
-
-
-def _scrape_biolegend(query: str, max_results: int, timeout: int) -> list[PriceResult]:
-    """Scrape BioLegend structured catalog."""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-    except ImportError:
-        return []
-
-    url = f"https://www.biolegend.com/en-us/search-results?Keywords={quote_plus(query)}"
-    results = []
-
-    try:
-        resp = requests.get(url, headers=_get_headers(), timeout=timeout)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        cards = soup.select(".product-listing, .search-result")[:max_results]
-        for card in cards:
-            try:
-                name_el = card.select_one(".product-name, h3")
-                price_el = card.select_one(".price")
-                cat_el = card.select_one(".catalog-number")
-
-                results.append(PriceResult(
-                    product_name=name_el.get_text(strip=True) if name_el else "",
-                    price=_parse_price(price_el.get_text(strip=True)) if price_el else 0,
-                    vendor="BioLegend",
-                    catalog_no=cat_el.get_text(strip=True) if cat_el else "",
-                    url=url,
-                    target=query.split()[0] if query else "",
-                    scraped_at=datetime.now(),
-                    is_cached=False,
-                ))
-            except Exception:
-                continue
-
-    except Exception as e:
-        logger.error(f"BioLegend scraping failed: {e}")
-
-    return results[:max_results]
-
-
-def _scrape_thermo(query: str, max_results: int, timeout: int) -> list[PriceResult]:
+def _live_search(query: str, max_results: int) -> list[PriceResult]:
     """
-    Thermo Fisher requires JS rendering (Playwright).
-    Falls back to empty list if Playwright not available.
+    Fallback live scraping. Only used when local catalog is empty/unavailable.
+    Rate-limited and slower than local catalog.
     """
-    logger.info("Thermo Fisher scraper requires Playwright — skipping in basic mode")
-    return []
+    import random
+    import time
+    from urllib.parse import quote_plus
 
-
-def _scrape_rnd(query: str, max_results: int, timeout: int) -> list[PriceResult]:
-    """Scrape R&D Systems."""
     try:
         import requests
         from bs4 import BeautifulSoup
     except ImportError:
+        logger.warning("requests/beautifulsoup4 not installed — live scraping unavailable")
         return []
 
-    url = f"https://www.rndsystems.com/search?keywords={quote_plus(query)}"
-    results = []
+    # Simple Biocompare search as fallback
+    url = f"https://www.biocompare.com/pfu/110487/scp/antibodies?search={quote_plus(query)}"
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+    ]
 
     try:
-        resp = requests.get(url, headers=_get_headers(), timeout=timeout)
+        time.sleep(random.uniform(2.5, 5.0))
+        headers = {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
 
-        cards = soup.select(".product-card, .search-result")[:max_results]
-        for card in cards:
-            try:
-                name_el = card.select_one(".product-name, h3, h4")
-                price_el = card.select_one(".price")
-                results.append(PriceResult(
-                    product_name=name_el.get_text(strip=True) if name_el else "",
-                    price=_parse_price(price_el.get_text(strip=True)) if price_el else 0,
-                    vendor="R&D Systems",
-                    url=url,
-                    target=query.split()[0] if query else "",
-                    scraped_at=datetime.now(),
-                    is_cached=False,
-                ))
-            except Exception:
-                continue
+        # Try to extract any product info from the page
+        # (This is best-effort — the monthly scrape is the primary approach)
+        logger.info(f"Live search returned {resp.status_code} for {url}")
+        return []  # Parsing would need site-specific selectors
 
     except Exception as e:
-        logger.error(f"R&D Systems scraping failed: {e}")
-
-    return results[:max_results]
-
-
-def _scrape_sigma(query: str, max_results: int, timeout: int) -> list[PriceResult]:
-    """Scrape Sigma-Aldrich / MilliporeSigma."""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-    except ImportError:
+        logger.error(f"Live search failed: {e}")
         return []
 
-    url = f"https://www.sigmaaldrich.com/US/en/search/{quote_plus(query)}?focus=products&page=1&perpage={max_results}&sort=relevance&term={quote_plus(query)}&type=product"
-    results = []
 
+def get_catalog_stats(db_dir: str = None) -> Optional[dict]:
+    """Get statistics about the local Biocompare catalog."""
     try:
-        resp = requests.get(url, headers=_get_headers(), timeout=timeout)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # Sigma embeds data in __INITIAL_STATE__
-        scripts = soup.find_all("script")
-        for script in scripts:
-            if script.string and "__INITIAL_STATE__" in (script.string or ""):
-                import json
-                import re
-                match = re.search(r"window\.__INITIAL_STATE__\s*=\s*({.*?});", script.string, re.DOTALL)
-                if match:
-                    try:
-                        data = json.loads(match.group(1))
-                        # Extract products from state (structure varies)
-                        products = data.get("search", {}).get("products", [])
-                        for p in products[:max_results]:
-                            results.append(PriceResult(
-                                product_name=p.get("name", ""),
-                                price=float(p.get("price", {}).get("value", 0)),
-                                vendor="Sigma-Aldrich",
-                                catalog_no=p.get("productNumber", ""),
-                                url=f"https://www.sigmaaldrich.com{p.get('url', '')}",
-                                target=query.split()[0] if query else "",
-                                scraped_at=datetime.now(),
-                                is_cached=False,
-                            ))
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-
-    except Exception as e:
-        logger.error(f"Sigma scraping failed: {e}")
-
-    return results[:max_results]
+        from core.biocompare_scraper import get_catalog_db
+        catalog = get_catalog_db(db_dir)
+        if catalog:
+            return catalog.get_stats()
+    except Exception:
+        pass
+    return None
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def _parse_price(price_str: str) -> float:
-    """Parse a price string like '$385.00' or '€420' into a float."""
-    import re
-    if not price_str:
-        return 0
-    # Remove currency symbols, commas, whitespace
-    cleaned = re.sub(r"[^\d.]", "", price_str)
-    try:
-        return float(cleaned)
-    except ValueError:
-        return 0
-
+# ─── Manual Entry ────────────────────────────────────────────────────────────
 
 def create_manual_price_result(
     target: str,
@@ -427,7 +192,7 @@ def create_manual_price_result(
 ) -> PriceResult:
     """
     Create a PriceResult from manual user input.
-    Used as fallback when scraping fails.
+    Always available as last resort when both catalog and live scraping fail.
     """
     return PriceResult(
         target=target,

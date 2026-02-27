@@ -1,8 +1,8 @@
 """
 gui_streamlit/pages/page_price_search.py — Antibody Price Search.
 
-Standalone pricing search and comparison screen.
-Can be used independently or linked from the Panel Builder.
+Searches the local Biocompare catalog (populated by monthly batch scrape).
+Falls back to manual entry if catalog is empty.
 """
 
 import streamlit as st
@@ -12,14 +12,30 @@ from datetime import datetime
 
 def render():
     from gui_streamlit.shared import get_db_manager, load_config
-    from core.scraper import search as scraper_search, create_manual_price_result
-    from core.price_cache import get_cached, store_results
+    from core.scraper import search as scraper_search, create_manual_price_result, get_catalog_stats
     from core.models import PriceResult
 
-    db = get_db_manager()
     config = load_config()
 
     st.title("💰 Antibody Price Search")
+
+    # ─── Catalog Status Banner ────────────────────────────────────────
+    stats = get_catalog_stats()
+    if stats and stats.get("product_count", 0) > 0:
+        last = stats.get("last_scrape")
+        last_date = last.get("started_at", "Unknown")[:10] if last else "Unknown"
+        st.caption(
+            f"📚 Local catalog: **{stats['product_count']:,}** products, "
+            f"**{stats['antigen_count']:,}** antigens, "
+            f"**{stats['vendor_count']:,}** vendors  "
+            f"(last updated: {last_date})"
+        )
+    else:
+        st.warning(
+            "⚠️ No local Biocompare catalog found. Run the monthly scraper to populate it:\n\n"
+            "```\npython scripts/run_monthly_scrape.py --test\n```\n\n"
+            "In the meantime, you can use manual entry below."
+        )
 
     # ─── Search Bar ──────────────────────────────────────────────────
     col1, col2 = st.columns([4, 1])
@@ -27,7 +43,7 @@ def render():
         query = st.text_input(
             "Search antibodies",
             value=st.session_state.price_search_query,
-            placeholder="e.g., anti-CD3 human IF rabbit",
+            placeholder="e.g., CD3, RAB5, Ki67, GFAP...",
         )
         st.session_state.price_search_query = query
     with col2:
@@ -36,47 +52,39 @@ def render():
 
     # ─── Filters ─────────────────────────────────────────────────────
     with st.expander("🔽 Filters"):
-        fc1, fc2, fc3 = st.columns(3)
+        fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1:
-            host_filter = st.selectbox("Host Species", ["Any", "Rabbit", "Mouse", "Goat", "Rat"])
+            host_filter = st.selectbox("Host Species", ["Any", "Rabbit", "Mouse", "Goat", "Rat", "Human"])
         with fc2:
-            app_filter = st.selectbox("Application", ["Any", "IF", "IHC", "ICC", "FC", "WB"])
+            app_filter = st.selectbox("Application", ["Any", "IF", "IHC", "ICC", "FC", "WB", "ELISA", "IP"])
         with fc3:
-            conjugate_filter = st.text_input("Conjugate", "", placeholder="e.g., AF647, FITC")
+            conjugate_filter = st.text_input("Conjugate", "", placeholder="e.g., AF647, FITC, Unconjugated")
+        with fc4:
+            reactivity_filter = st.selectbox("Reactivity", ["Any", "Human", "Mouse", "Rat"])
 
-        sort_by = st.radio("Sort by", ["Price (Low → High)", "Price/size", "Review Score"], horizontal=True)
+        sort_by = st.radio("Sort by", ["Price (Low → High)", "Price (High → Low)", "Product Name"], horizontal=True)
 
     # ─── Execute Search ──────────────────────────────────────────────
     if search_btn and query:
-        with st.spinner("Searching... (checking cache first)"):
-            # Check cache
-            with db.cache_session() as session:
-                cached = get_cached(session, query)
+        with st.spinner("Searching local catalog..."):
+            results = scraper_search(
+                query=query,
+                host=host_filter if host_filter != "Any" else "",
+                application=app_filter if app_filter != "Any" else "",
+                conjugate=conjugate_filter,
+                reactivity=reactivity_filter if reactivity_filter != "Any" else "",
+                max_results=100,
+            )
 
-            if cached:
-                st.session_state.price_results = cached
-                st.info(f"📦 Showing {len(cached)} cached results. Click 'Refresh' for live data.")
+            if results:
+                st.session_state.price_results = results
+                st.success(f"Found {len(results)} results in local catalog.")
             else:
-                # Try live scraping
-                try:
-                    vendors = config.get("scraping", {}).get("vendor_priority", [
-                        "Biocompare", "Abcam", "Cell Signaling Technology", "BioLegend"
-                    ])
-                    results = scraper_search(query, vendors=vendors, max_results=10)
-
-                    if results:
-                        # Cache results
-                        with db.cache_session() as session:
-                            store_results(session, query, results)
-                        st.session_state.price_results = results
-                        st.success(f"Found {len(results)} results.")
-                    else:
-                        st.warning("No results found. Try different search terms or use manual entry below.")
-                        st.session_state.price_results = []
-
-                except Exception as e:
-                    st.error(f"Search failed: {e}. Use manual entry below.")
-                    st.session_state.price_results = []
+                st.warning(
+                    "No results found. The local catalog may not contain this target. "
+                    "Try a different search term or use manual entry below."
+                )
+                st.session_state.price_results = []
 
     # ─── Results Table ───────────────────────────────────────────────
     results = st.session_state.get("price_results", [])
@@ -84,74 +92,90 @@ def render():
     if results:
         st.subheader(f"Results ({len(results)})")
 
-        # Apply filters
+        # Apply post-search filters
         filtered = results
         if host_filter != "Any":
             filtered = [r for r in filtered if host_filter.lower() in r.host_species.lower()]
         if app_filter != "Any":
-            filtered = [r for r in filtered if any(app_filter.lower() in a.lower() for a in r.validated_applications)]
+            filtered = [r for r in filtered
+                        if any(app_filter.lower() in a.lower() for a in r.validated_applications)
+                        or app_filter.upper() in (r.conjugate or "").upper()]
         if conjugate_filter:
-            filtered = [r for r in filtered if conjugate_filter.lower() in r.conjugate.lower()]
+            filtered = [r for r in filtered if conjugate_filter.lower() in (r.conjugate or "").lower()]
 
         # Sort
         if sort_by == "Price (Low → High)":
             filtered.sort(key=lambda r: r.price if r.price > 0 else 99999)
-        elif sort_by == "Review Score":
-            filtered.sort(key=lambda r: r.review_score, reverse=True)
+        elif sort_by == "Price (High → Low)":
+            filtered.sort(key=lambda r: r.price if r.price > 0 else 0, reverse=True)
+        elif sort_by == "Product Name":
+            filtered.sort(key=lambda r: r.product_name.lower())
 
         if filtered:
             df = pd.DataFrame([
                 {
-                    "Product": r.product_name[:60] if r.product_name else f"Anti-{r.target}",
+                    "Product": r.product_name[:70] if r.product_name else f"Anti-{r.target}",
+                    "Target": r.target,
                     "Vendor": r.vendor,
                     "Catalog #": r.catalog_no,
-                    "Price": f"${r.price:.2f}" if r.price > 0 else "Contact",
+                    "Price": f"${r.price:.2f}" if r.price > 0 else "Inquire",
                     "Size": r.package_size,
                     "Host": r.host_species,
-                    "Conjugate": r.conjugate,
-                    "Apps": ", ".join(r.validated_applications[:3]) if r.validated_applications else "",
-                    "Reviews": f"⭐ {r.review_score:.1f} ({r.num_reviews})" if r.review_score else "",
-                    "Cache": "📦 Cached" if r.is_cached else "🔴 Live",
+                    "Conjugate": r.conjugate or "",
+                    "Apps": ", ".join(r.validated_applications[:4]) if r.validated_applications else "",
+                    "Reactivity": ", ".join(r.reactivity[:3]) if r.reactivity else "",
                 }
                 for r in filtered
             ])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
             # Action buttons per result
-            for i, r in enumerate(filtered):
+            for i, r in enumerate(filtered[:20]):  # Limit buttons to first 20
                 cols = st.columns([3, 1, 1])
                 with cols[0]:
-                    st.caption(f"{r.vendor} — {r.catalog_no}")
+                    st.caption(f"{r.vendor} — {r.catalog_no or 'N/A'} — {r.product_name[:50]}")
                 with cols[1]:
                     if st.button("📦 Add to Inventory", key=f"inv_{i}"):
                         st.session_state.nav_page = "Inventory"
-                        st.session_state["show_add_form"] = True
+                        st.session_state["prefill_antibody"] = {
+                            "name": r.product_name,
+                            "target": r.target,
+                            "vendor": r.vendor,
+                            "catalog_no": r.catalog_no,
+                            "host_species": r.host_species,
+                            "conjugate": r.conjugate,
+                            "isotype": r.isotype,
+                            "clonality": r.clonality,
+                        }
                         st.rerun()
                 with cols[2]:
                     if r.url:
                         st.link_button("🔗 View", r.url)
         else:
-            st.info("No results match your filters.")
+            st.info("No results match your filters. Try broadening the filter criteria.")
 
     # ─── Manual Entry Fallback ───────────────────────────────────────
     st.divider()
     with st.expander("✏️ Manual Price Entry"):
-        st.caption("If scraping is unavailable, enter price details manually.")
+        st.caption("Enter antibody pricing details manually.")
         with st.form("manual_price"):
             mc1, mc2 = st.columns(2)
             with mc1:
                 m_target = st.text_input("Target", value=query.split()[0] if query else "")
                 m_vendor = st.text_input("Vendor")
                 m_catalog = st.text_input("Catalog #")
+                m_host = st.text_input("Host Species")
             with mc2:
                 m_price = st.number_input("Price ($)", min_value=0.0, step=10.0)
                 m_size = st.text_input("Package Size", placeholder="e.g., 100 µg")
                 m_url = st.text_input("Product URL")
+                m_conjugate = st.text_input("Conjugate", placeholder="e.g., Unconjugated, AF647")
 
             if st.form_submit_button("Add Manual Entry"):
                 manual = create_manual_price_result(
                     target=m_target, vendor=m_vendor, catalog_no=m_catalog,
                     price=m_price, package_size=m_size, url=m_url,
+                    host_species=m_host, conjugate=m_conjugate,
                 )
                 current_results = st.session_state.get("price_results", [])
                 current_results.append(manual)

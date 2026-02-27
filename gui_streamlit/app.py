@@ -8,7 +8,7 @@ Run with: streamlit run gui_streamlit/app.py
 import streamlit as st
 
 # shared.py handles sys.path setup and provides cached resources
-from shared import (
+from gui_streamlit.shared import (
     load_config,
     load_instrument_profiles,
     get_db_manager,
