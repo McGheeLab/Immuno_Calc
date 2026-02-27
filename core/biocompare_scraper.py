@@ -1,30 +1,26 @@
 """
 core/biocompare_scraper.py — Monthly Batch Biocompare Catalog Scraper.
 
-Crawls Biocompare's antibody browse pages and saves product data to a local
-SQLite database for instant offline querying by the panel designer software.
+Uses Selenium to drive a VISIBLE Chrome browser window. You can watch it work,
+manually solve CAPTCHAs, and inspect pages in real-time from VS Code's terminal.
+
+SETUP (one time):
+    pip install selenium webdriver-manager beautifulsoup4 lxml
+
+    webdriver-manager auto-downloads the correct ChromeDriver for your Chrome version.
+    No manual driver installation needed.
 
 USAGE:
-    python scripts/run_monthly_scrape.py              # Full scrape (all antigens)
-    python scripts/run_monthly_scrape.py --letter R    # Only letter R
-    python scripts/run_monthly_scrape.py --test        # Test with 3 antigens
+    python scripts/run_monthly_scrape.py --test           # Quick test, 3 antigens
+    python scripts/run_monthly_scrape.py --letter R        # Scrape letter R
+    python scripts/run_monthly_scrape.py                   # Full A-Z scrape
+    python scripts/run_monthly_scrape.py --interactive     # Pause between pages
 
-URL STRUCTURE (from biocompare.com):
-    Index:     /1997-BrowseCategory/browse/gb1/9776/all
-    Letter:    /1997-BrowseCategory/browse/gb1/9776/{LETTER}/0/0
-    Listing:   /pfu/110447/soids/{ANTIGEN_ID}/Antibodies/{ANTIGEN_NAME}
-    Detail:    individual product pages linked from listing
-
-SCRAPE LEVELS:
-    Level 1 — Antigen index:   Get all target antigen names + listing URLs
-    Level 2 — Product listing:  Get summary data per antibody (name, vendor, price,
-                                applications, reactivity, conjugate, quantity)
-    Level 3 — Product detail:   Get full specs (catalog#, host, isotype, clonality,
-                                immunogen) — optional, much slower
-
-NOTE: CSS selectors in this file are based on page content analysis from Feb 2026.
-      Biocompare may change their HTML structure. If scraping breaks, update the
-      selector constants in the _SELECTORS dict and the parsing functions below.
+URL STRUCTURE (Biocompare):
+    Browse index:    /1997-BrowseCategory/browse/gb1/9776/all
+    Letter page:     /1997-BrowseCategory/browse/gb1/9776/{LETTER}/0/0
+    Product listing: /pfu/110447/soids/{ID}/Antibodies/{ANTIGEN}
+    Product detail:  individual product page (linked from listing)
 """
 
 from __future__ import annotations
@@ -32,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import re
 import sqlite3
 import time
@@ -46,24 +41,65 @@ logger = logging.getLogger(__name__)
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 BASE_URL = "https://www.biocompare.com"
+ANTIBODY_SEARCH_URL = f"{BASE_URL}/Antibodies/"
+SEARCH_ANTIBODIES_URL = f"{BASE_URL}/Search-Antibodies/"
 BROWSE_INDEX_URL = f"{BASE_URL}/1997-BrowseCategory/browse/gb1/9776/all"
 BROWSE_LETTER_URL = f"{BASE_URL}/1997-BrowseCategory/browse/gb1/9776/{{letter}}/0/0"
 
-# Rate limiting
-MIN_DELAY = 2.5  # seconds between requests
-MAX_DELAY = 5.0
+# Biocompare antibody type filter IDs (soids parameter)
+ANTIBODY_TYPE_SOIDS = {
+    "primary": "269752",
+    "secondary": "218589",
+    "pairs": "2318295",
+}
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
+# How long to wait between page loads (seconds) — be polite to Biocompare
+PAGE_LOAD_DELAY = 3.0
+# How long Selenium waits for elements to appear
+IMPLICIT_WAIT = 10
+# Maximum time to wait for page to fully load
+PAGE_TIMEOUT = 30
 
-# Letters to iterate for browsing
 BROWSE_LETTERS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["#"]
 
-# ─── Database Schema ─────────────────────────────────────────────────────────
+
+def build_search_url(
+    antibody_type: str = "",
+    vendor_vids: list[str] = None,
+) -> str:
+    """
+    Build a Biocompare filtered search URL.
+
+    Examples:
+        build_search_url("primary")
+        → https://www.biocompare.com/Search-Antibodies/?said=0&soids=269752
+        build_search_url("secondary", ["100436", "100041"])
+        → https://www.biocompare.com/Search-Antibodies/?said=0&soids=218589&vids=100436,100041
+    """
+    params = ["said=0"]
+    if antibody_type and antibody_type in ANTIBODY_TYPE_SOIDS:
+        params.append(f"soids={ANTIBODY_TYPE_SOIDS[antibody_type]}")
+    if vendor_vids:
+        params.append(f"vids={','.join(vendor_vids)}")
+    return f"{SEARCH_ANTIBODIES_URL}?{'&'.join(params)}"
+
+
+def load_vendors_config() -> dict:
+    """Load vendors.yaml. Returns {'antibody_types': {...}, 'vendors': [...]}."""
+    import yaml
+    vendors_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data", "vendors.yaml"
+    )
+    if os.path.exists(vendors_path):
+        with open(vendors_path) as f:
+            return yaml.safe_load(f) or {}
+    return {"antibody_types": {}, "vendors": []}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE (same as before — local SQLite catalog)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 CATALOG_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS scrape_runs (
@@ -133,8 +169,6 @@ CREATE TABLE IF NOT EXISTS scrape_log (
 """
 
 
-# ─── Database Helpers ────────────────────────────────────────────────────────
-
 class BiocompareCatalogDB:
     """Interface to the local Biocompare catalog SQLite database."""
 
@@ -151,7 +185,7 @@ class BiocompareCatalogDB:
         conn.row_factory = sqlite3.Row
         return conn
 
-    # ── Write operations (used by scraper) ──
+    # ── Write operations ──
 
     def start_scrape_run(self, letters: str = "all") -> int:
         with self._connect() as conn:
@@ -191,7 +225,6 @@ class BiocompareCatalogDB:
             "citations_count", "figures_count", "review_count",
             "detail_url", "supplier_url", "scraped_at", "scrape_level",
         ]
-        # Set defaults
         data.setdefault("scraped_at", datetime.now().isoformat())
         data.setdefault("scrape_level", 2)
         data.setdefault("price_currency", "USD")
@@ -199,10 +232,12 @@ class BiocompareCatalogDB:
         data["antigen_name"] = data["antigen_name"].upper()
 
         values = [data.get(f, "") for f in fields]
-
         placeholders = ", ".join(["?"] * len(fields))
         columns = ", ".join(fields)
-        update_clause = ", ".join(f"{f}=excluded.{f}" for f in fields if f not in ("antigen_name", "product_name", "vendor"))
+        update_clause = ", ".join(
+            f"{f}=excluded.{f}" for f in fields
+            if f not in ("antigen_name", "product_name", "vendor")
+        )
 
         with self._connect() as conn:
             conn.execute(
@@ -218,7 +253,7 @@ class BiocompareCatalogDB:
                 (datetime.now().isoformat(), level, url, message),
             )
 
-    # ── Read operations (used by app) ──
+    # ── Read operations (used by the app for instant search) ──
 
     def search_products(
         self,
@@ -231,15 +266,10 @@ class BiocompareCatalogDB:
         vendor: str = "",
         max_results: int = 50,
     ) -> list[dict]:
-        """
-        Search the local catalog. All filters use LIKE matching.
-        Returns list of product dicts.
-        """
         conditions = []
         params = []
 
         if query:
-            # Search across product name, antigen, and vendor
             conditions.append("(product_name LIKE ? OR antigen_name LIKE ? OR vendor LIKE ?)")
             q = f"%{query}%"
             params.extend([q, q, q])
@@ -272,7 +302,6 @@ class BiocompareCatalogDB:
             return [dict(row) for row in rows]
 
     def get_antigens(self, letter: str = "") -> list[dict]:
-        """Get all antigens, optionally filtered by starting letter."""
         with self._connect() as conn:
             if letter:
                 rows = conn.execute(
@@ -284,16 +313,13 @@ class BiocompareCatalogDB:
             return [dict(row) for row in rows]
 
     def get_stats(self) -> dict:
-        """Get catalog statistics."""
         with self._connect() as conn:
             antigen_count = conn.execute("SELECT COUNT(*) FROM antigens").fetchone()[0]
             product_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
             vendor_count = conn.execute("SELECT COUNT(DISTINCT vendor) FROM products").fetchone()[0]
-
             last_run = conn.execute(
                 "SELECT * FROM scrape_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
-
             return {
                 "antigen_count": antigen_count,
                 "product_count": product_count,
@@ -302,112 +328,341 @@ class BiocompareCatalogDB:
             }
 
     def export_to_csv(self, output_path: str | Path):
-        """Export entire product catalog to CSV."""
         import csv
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM products ORDER BY antigen_name, vendor").fetchall()
             if not rows:
                 logger.warning("No products to export")
                 return
-
             with open(output_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(rows[0].keys())
                 for row in rows:
                     writer.writerow(tuple(row))
-
         logger.info(f"Exported {len(rows)} products to {output_path}")
 
 
-# ─── HTTP Helpers ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# SELENIUM BROWSER DRIVER
+# ═══════════════════════════════════════════════════════════════════════════════
 
-_last_request_time = 0.0
-
-
-def _rate_limit():
-    """Enforce minimum delay between requests."""
-    global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    delay = random.uniform(MIN_DELAY, MAX_DELAY)
-    if elapsed < delay:
-        time.sleep(delay - elapsed)
-    _last_request_time = time.time()
-
-
-def _get_headers() -> dict:
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
-    }
-
-
-def _fetch_page(url: str, timeout: int = 30, retries: int = 3) -> Optional[str]:
+class ChromeBrowser:
     """
-    Fetch a URL with rate limiting, retries, and error handling.
-    Returns HTML text or None on failure.
-    """
-    import requests
+    Manages a visible Chrome browser window via Selenium.
 
-    for attempt in range(retries):
-        _rate_limit()
+    The browser stays OPEN and VISIBLE so you can:
+      - Watch pages load in real time
+      - Manually solve CAPTCHAs if Biocompare presents one
+      - Open Chrome DevTools to inspect HTML structure
+      - Right-click > Inspect to find CSS selectors
+    """
+
+    def __init__(self, headless: bool = False):
+        self.driver = None
+        self.headless = headless
+
+    def start(self):
+        """Launch Chrome. Uses webdriver-manager to auto-install ChromeDriver."""
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+
+        options = Options()
+
+        if self.headless:
+            options.add_argument("--headless=new")
+
+        # Normal browser settings to avoid detection
+        options.add_argument("--window-size=1400,900")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        # Try webdriver-manager first (auto-downloads correct ChromeDriver)
         try:
-            resp = requests.get(url, headers=_get_headers(), timeout=timeout)
-            if resp.status_code == 200:
-                return resp.text
-            elif resp.status_code == 429:
-                # Rate limited — back off exponentially
-                wait = (2 ** attempt) * 10
-                logger.warning(f"Rate limited (429) on {url} — waiting {wait}s")
-                time.sleep(wait)
-            elif resp.status_code == 404:
-                logger.warning(f"404 Not Found: {url}")
-                return None
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+        except ImportError:
+            # Fall back to assuming chromedriver is on PATH
+            logger.info("webdriver-manager not installed, using system chromedriver")
+            self.driver = webdriver.Chrome(options=options)
+
+        self.driver.implicitly_wait(IMPLICIT_WAIT)
+        self.driver.set_page_load_timeout(PAGE_TIMEOUT)
+
+        # Remove webdriver flag to reduce bot detection
+        self.driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
+        logger.info(f"Chrome started ({'headless' if self.headless else 'visible window'})")
+
+    def get_page(self, url: str, wait_seconds: float = PAGE_LOAD_DELAY) -> str:
+        """
+        Navigate to URL and return the fully-rendered page source.
+        Waits for JS to finish rendering before returning.
+        """
+        try:
+            self.driver.get(url)
+            time.sleep(wait_seconds)  # Let JS render
+
+            # Additional wait for dynamic content
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.by import By
+
+            # Wait until body has content
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            return self.driver.page_source
+
+        except Exception as e:
+            logger.error(f"Failed to load {url}: {e}")
+            return ""
+
+    def get_page_interactive(self, url: str) -> str:
+        """
+        Navigate to URL and WAIT for user to press Enter in terminal.
+        Use this when you need to manually interact with the page first
+        (solve CAPTCHA, click cookie consent, etc.)
+        """
+        try:
+            self.driver.get(url)
+            time.sleep(2)
+            input(f"\n    ⏸️  Page loaded: {url}\n"
+                  f"    → Inspect the page in Chrome, solve any CAPTCHAs, etc.\n"
+                  f"    → Press ENTER in this terminal when ready to continue...\n")
+            return self.driver.page_source
+        except Exception as e:
+            logger.error(f"Failed to load {url}: {e}")
+            return ""
+
+    def scroll_to_bottom(self):
+        """Scroll page to bottom to trigger lazy-loaded content."""
+        self.driver.execute_script(
+            "window.scrollTo(0, document.body.scrollHeight);"
+        )
+        time.sleep(1.5)
+
+    def search_biocompare(
+        self,
+        query: str,
+        search_url: str = "",
+        wait_seconds: float = PAGE_LOAD_DELAY,
+    ) -> str:
+        """
+        Search Biocompare for antibodies. Navigates to the search page,
+        types the query into the search bar, clicks Search, returns results.
+
+        Actual page elements (as of 2025):
+          Search input:  <input id="ctl06_ctl12_ctl00_txtSearch" class="span2 txtSearch textbox">
+          Search button: <input id="ctl06_ctl12_ctl00_btnProductSearch" class="button search btnProductSearch" type="button">
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        target_page = search_url or ANTIBODY_SEARCH_URL
+
+        try:
+            # ── Navigate ──────────────────────────────────────────────
+            logger.info(f"  Navigating to {target_page}")
+            self.driver.get(target_page)
+            time.sleep(wait_seconds + 2)  # Extra time for ASP.NET page to render
+
+            # ── Dismiss cookie consent / overlays if present ──────────
+            for dismiss_sel in [
+                "button[id*='cookie']", "button[id*='consent']",
+                "button[class*='cookie']", "a[class*='close']",
+                ".cookie-accept", "#onetrust-accept-btn-handler",
+            ]:
+                try:
+                    btn = self.driver.find_element(By.CSS_SELECTOR, dismiss_sel)
+                    if btn.is_displayed():
+                        btn.click()
+                        logger.info(f"  Dismissed overlay: {dismiss_sel}")
+                        time.sleep(1)
+                        break
+                except Exception:
+                    continue
+
+            # ── Find search input ─────────────────────────────────────
+            # The ID contains ASP.NET control path — use class or ends-with
+            search_box = None
+            input_selectors = [
+                "input.txtSearch",                          # class match
+                "input[id$='_txtSearch']",                  # ID ends with _txtSearch
+                "#ctl06_ctl12_ctl00_txtSearch",             # exact ID from page
+                "input[name$='txtSearch']",                 # name ends with txtSearch
+                "#txtSearch",                               # simple ID (other pages)
+                "input.textbox[type='text']",               # generic textbox
+            ]
+
+            for selector in input_selectors:
+                try:
+                    search_box = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                    if search_box:
+                        logger.info(f"  ✅ Found search input: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            if not search_box:
+                # Debug: save page source and screenshot
+                self._save_debug_state("search_input_not_found")
+                logger.error("  ❌ Could not find search input. Debug files saved.")
+                return ""
+
+            # Scroll into view and click to focus
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'}); arguments[0].focus();",
+                search_box,
+            )
+            time.sleep(0.5)
+
+            # Clear and type
+            search_box.clear()
+            time.sleep(0.3)
+            search_box.send_keys(query)
+            time.sleep(0.5)
+            logger.info(f"  Typed: {query}")
+
+            # ── Find and click Search button ──────────────────────────
+            # type="button" means it's JS-driven, not a form submit
+            search_btn = None
+            btn_selectors = [
+                "input.btnProductSearch",                   # class match
+                "input[id$='_btnProductSearch']",           # ID ends with
+                "#ctl06_ctl12_ctl00_btnProductSearch",      # exact ID from page
+                "input[name$='btnProductSearch']",          # name ends with
+                "input.button.search",                      # compound class
+                "input[value='Search']",                    # by value text
+            ]
+
+            for selector in btn_selectors:
+                try:
+                    search_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    if search_btn:
+                        logger.info(f"  ✅ Found search button: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            if search_btn:
+                # Scroll button into view
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", search_btn
+                )
+                time.sleep(0.3)
+
+                # Try normal click first
+                try:
+                    search_btn.click()
+                    logger.info("  Clicked search button (normal click)")
+                except Exception as click_err:
+                    # Fallback: JavaScript click (bypasses overlays)
+                    logger.info(f"  Normal click failed ({click_err}), trying JS click")
+                    self.driver.execute_script("arguments[0].click();", search_btn)
+                    logger.info("  Clicked search button (JS click)")
             else:
-                logger.warning(f"HTTP {resp.status_code} for {url}")
-                time.sleep(5)
-        except requests.exceptions.Timeout:
-            logger.warning(f"Timeout on attempt {attempt + 1} for {url}")
-            time.sleep(5)
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request error on {url}: {e}")
-            time.sleep(5)
+                # No button found — try Enter key, then try JS to trigger ASP.NET postback
+                logger.warning("  ⚠️ Search button not found, trying alternatives")
+                try:
+                    # Try triggering the ASP.NET __doPostBack directly
+                    self.driver.execute_script(
+                        "if (typeof __doPostBack === 'function') {"
+                        "  __doPostBack('ctl06$ctl12$ctl00$btnProductSearch','');"
+                        "}"
+                    )
+                    logger.info("  Triggered __doPostBack")
+                except Exception:
+                    search_box.send_keys(Keys.RETURN)
+                    logger.info("  Pressed Enter as final fallback")
 
-    logger.error(f"Failed to fetch {url} after {retries} attempts")
-    return None
+            # ── Wait for results ──────────────────────────────────────
+            logger.info("  Waiting for results to load...")
+            time.sleep(wait_seconds + 3)
+
+            # Wait for either product results or "no results" message
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: (
+                        d.find_elements(By.CSS_SELECTOR, ".product-listing, .search-result, table.results, .no-results, .product-item")
+                        or "results" in d.page_source.lower()
+                    )
+                )
+            except Exception:
+                logger.info("  No specific results container detected, using page as-is")
+
+            # Scroll to load lazy content
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.5)
+
+            page_source = self.driver.page_source
+            logger.info(f"  Search complete for: {query} ({len(page_source)} chars)")
+
+            # Save debug HTML
+            self._save_debug(f"search_results_{query}", page_source)
+
+            return page_source
+
+        except Exception as e:
+            logger.error(f"  Search failed for '{query}': {e}")
+            self._save_debug_state(f"search_error_{query}")
+            return ""
+
+    def _save_debug_state(self, label: str):
+        """Save screenshot + page source for debugging."""
+        debug_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            self.driver.save_screenshot(os.path.join(debug_dir, f"{label}.png"))
+            with open(os.path.join(debug_dir, f"{label}.html"), "w", encoding="utf-8") as f:
+                f.write(self.driver.page_source)
+            logger.info(f"  Debug files saved: debug/{label}.png + .html")
+        except Exception as e:
+            logger.error(f"  Could not save debug state: {e}")
+
+    def save_screenshot(self, path: str):
+        """Save a screenshot for debugging."""
+        self.driver.save_screenshot(path)
+        logger.info(f"Screenshot saved: {path}")
+
+    def save_page_source(self, path: str):
+        """Save current page HTML for debugging selectors offline."""
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.driver.page_source)
+        logger.info(f"Page source saved: {path}")
+
+    def quit(self):
+        if self.driver:
+            self.driver.quit()
+            logger.info("Chrome closed")
 
 
-# ─── Parsing Functions ───────────────────────────────────────────────────────
-# These parse Biocompare HTML pages. If Biocompare changes their layout,
-# update these functions. Each is isolated so changes are localized.
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# HTML PARSING (works on page_source from Selenium)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_antigen_index(html: str) -> list[dict]:
     """
-    Parse the antigen browse page to extract target names and their listing URLs.
-
-    The browse page (e.g., /1997-BrowseCategory/browse/gb1/9776/all) contains
-    links to each antigen's product listing page.
-
-    Returns list of dicts: [{"name": "RAB5", "url": "/pfu/.../Antibodies/RAB5", "display_name": "..."}]
+    Parse the browse/letter page to extract antigen names + listing URLs.
+    These pages list target antigens as links to their product listing pages.
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
     antigens = []
 
-    # The browse page lists antigens as links. Look for links that point to
-    # product listing pages (contain /pfu/ or /soids/ in the href).
-    # Also look for links in the main content area that list antigen names.
-    # 
-    # Strategy: Find all <a> tags whose href contains the antibody listing pattern
-    # Pattern from user: /pfu/110447/soids/277971/Antibodies/RAB
     for link in soup.find_all("a", href=True):
         href = link["href"]
-        # Match links to product listing pages
+        # Match product listing links (pattern: /pfu/.../Antibodies/...)
         if "/pfu/" in href and "/Antibodies/" in href:
             name = link.get_text(strip=True)
             if name and len(name) > 1:
@@ -416,8 +671,8 @@ def parse_antigen_index(html: str) -> list[dict]:
                     "display_name": name.strip(),
                     "url": urljoin(BASE_URL, href),
                 })
-        # Also match browse sub-category links
-        elif "/soids/" in href:
+        # Also match browse category links with /soids/
+        elif "/soids/" in href and "Antibod" in href:
             name = link.get_text(strip=True)
             if name and len(name) > 1:
                 antigens.append({
@@ -426,7 +681,7 @@ def parse_antigen_index(html: str) -> list[dict]:
                     "url": urljoin(BASE_URL, href),
                 })
 
-    # Deduplicate by name
+    # Deduplicate
     seen = set()
     unique = []
     for a in antigens:
@@ -434,20 +689,17 @@ def parse_antigen_index(html: str) -> list[dict]:
             seen.add(a["name"])
             unique.append(a)
 
-    logger.info(f"Found {len(unique)} antigens on index page")
+    logger.info(f"Found {len(unique)} antigens on browse page")
     return unique
 
 
 def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Optional[str]]:
     """
-    Parse a product listing page to extract antibody product summaries.
+    Parse a product listing page. Returns (products, next_page_url).
 
-    The listing page (e.g., /pfu/110447/soids/277971/Antibodies/RAB) shows
-    product cards with: name, vendor, price, applications, reactivity,
-    conjugate, quantity, citations.
-
-    Returns:
-        (products, next_page_url) — next_page_url is None if no more pages
+    The listing shows product cards with name, vendor, price, applications,
+    reactivity, conjugate, quantity, citations. Since Biocompare renders
+    this with JS, we get the FULLY RENDERED page source from Selenium.
     """
     from bs4 import BeautifulSoup
 
@@ -455,28 +707,25 @@ def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Opt
     products = []
     now = datetime.now().isoformat()
 
-    # ── Strategy for parsing product cards ──
-    # Based on the pasted content, each product block has:
-    #   - Product name (link text)
-    #   - "Applications:" line
-    #   - "Reactivity:" line
-    #   - "Conjugate/Tag:" line
-    #   - "Quantity:" line
-    #   - Price (like "$711.00")
-    #   - Vendor name (like "Abbexa Ltd")
-    #   - "Supplier Page" link
-    #   - "Citations:" count
-    #   - "Figures:" count
-    #
-    # We try multiple parsing strategies to be robust.
+    # ── Strategy 1: Find product card containers ──
+    # Try multiple selector patterns (Biocompare may use any of these)
+    card_selectors = [
+        ".product-card",
+        ".search-result-item",
+        ".product-listing-item",
+        ".pfu-product",
+        "[data-product-id]",
+        ".product-result",
+        ".compare-product-container",
+        ".product-row",
+    ]
 
-    # Strategy 1: Look for product containers with structured data
-    # Biocompare uses product card divs. Try common class patterns.
-    product_cards = soup.select(
-        ".product-card, .search-result-item, .product-listing-item, "
-        ".pfu-product, .compare-product, [data-product-id], "
-        ".product-result, .product-row"
-    )
+    product_cards = []
+    for selector in card_selectors:
+        product_cards = soup.select(selector)
+        if product_cards:
+            logger.debug(f"Found {len(product_cards)} cards with selector: {selector}")
+            break
 
     if product_cards:
         for card in product_cards:
@@ -484,112 +733,85 @@ def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Opt
             if product and product.get("product_name"):
                 products.append(product)
 
-    # Strategy 2: If structured cards not found, try text-based parsing
-    # The pasted content shows products as text blocks with labeled fields
+    # ── Strategy 2: Text-block parsing (fallback) ──
     if not products:
-        products = _parse_listing_text_blocks(soup, antigen_name, now)
+        products = _parse_listing_by_text(soup, antigen_name, now)
 
-    # Strategy 3: Parse from any table structure
-    if not products:
-        products = _parse_listing_tables(soup, antigen_name, now)
+    # ── Find next page link ──
+    next_url = _find_next_page(soup)
 
-    # ── Find next page URL ──
-    next_url = None
-    # Look for pagination: "1 2 >" or "Next" links
-    pager = soup.select("a.next, a[rel='next'], .pagination a, .pager a")
-    for link in pager:
-        text = link.get_text(strip=True)
-        if text in (">", "Next", "»", "next") or "next" in link.get("class", []):
-            href = link.get("href", "")
-            if href:
-                next_url = urljoin(BASE_URL, href)
-                break
-
-    # Also check for numbered pagination
-    if not next_url:
-        page_links = soup.select("a[href*='page='], a[href*='/page/']")
-        # Find current page number and get next
-        for link in page_links:
-            text = link.get_text(strip=True)
-            if text == ">":
-                href = link.get("href", "")
-                if href:
-                    next_url = urljoin(BASE_URL, href)
-                    break
-
-    logger.info(f"Parsed {len(products)} products for {antigen_name}" +
-                (f" (next page: {next_url})" if next_url else " (last page)"))
+    logger.info(
+        f"  Parsed {len(products)} products for {antigen_name}"
+        + (f" (next: {next_url})" if next_url else " (last page)")
+    )
     return products, next_url
 
 
 def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dict]:
-    """Parse a single product card element."""
+    """Parse structured product card element."""
     try:
-        # Product name: usually in a heading or strong link
-        name_el = card.select_one("h3, h4, h5, .product-name, .product-title, strong > a, a > strong")
-        name = name_el.get_text(strip=True) if name_el else ""
+        # Product name
+        name = ""
+        for sel in ["h3", "h4", "h5", ".product-name", ".product-title", "strong > a", "a > strong"]:
+            el = card.select_one(sel)
+            if el:
+                name = el.get_text(strip=True)
+                break
         if not name:
-            # Try first link text
             first_link = card.select_one("a")
             name = first_link.get_text(strip=True) if first_link else ""
-
         if not name or len(name) < 3:
             return None
 
-        # Vendor: look for company/supplier name
+        # Vendor
         vendor = ""
-        vendor_candidates = card.select(".supplier, .vendor, .company-name, .supplier-name")
-        if vendor_candidates:
-            vendor = vendor_candidates[0].get_text(strip=True)
+        for sel in [".supplier", ".vendor", ".company-name", ".supplier-name"]:
+            el = card.select_one(sel)
+            if el:
+                vendor = el.get_text(strip=True)
+                break
 
-        # Price: look for dollar amount
+        # Price
         price = 0.0
         price_el = card.select_one(".price, .product-price, [class*='price']")
         if price_el:
             price = _parse_price_str(price_el.get_text(strip=True))
         else:
-            # Search all text for $xxx.xx pattern
-            card_text = card.get_text()
-            price_match = re.search(r'\$[\d,]+\.?\d*', card_text)
-            if price_match:
-                price = _parse_price_str(price_match.group())
+            m = re.search(r'\$[\d,]+\.?\d*', card.get_text())
+            if m:
+                price = _parse_price_str(m.group())
 
-        # Applications
-        apps = _extract_labeled_field(card, "Applications")
+        card_text = card.get_text(separator="\n")
 
-        # Reactivity
-        reactivity = _extract_labeled_field(card, "Reactivity")
+        # Labeled fields
+        apps = _extract_field(card_text, "Applications")
+        reactivity = _extract_field(card_text, "Reactivity")
+        conjugate = _extract_field(card_text, "Conjugate/Tag") or _extract_field(card_text, "Conjugate")
+        quantity = _extract_field(card_text, "Quantity")
 
-        # Conjugate/Tag
-        conjugate = _extract_labeled_field(card, "Conjugate") or _extract_labeled_field(card, "Tag")
-
-        # Quantity
-        quantity = _extract_labeled_field(card, "Quantity")
-
-        # Detail URL
+        # URLs
         detail_url = ""
-        detail_link = card.select_one("a[href*='/pfu/'], a[href*='Supplier']")
-        if detail_link:
-            detail_url = urljoin(BASE_URL, detail_link.get("href", ""))
-
-        # Supplier Page URL
-        supplier_url = ""
-        for link in card.select("a"):
-            if "Supplier Page" in link.get_text():
-                supplier_url = link.get("href", "")
+        for a in card.select("a[href]"):
+            href = a.get("href", "")
+            if "/pfu/" in href or "Antibod" in href:
+                detail_url = urljoin(BASE_URL, href)
                 break
 
-        # Citations count
-        citations = 0
-        cit_match = re.search(r'Citations.*?\((\d+)\)', card.get_text())
-        if cit_match:
-            citations = int(cit_match.group(1))
+        supplier_url = ""
+        for a in card.select("a"):
+            if "Supplier Page" in a.get_text():
+                supplier_url = a.get("href", "")
+                break
 
-        # Figures count
+        # Citations / Figures
+        citations = 0
+        m = re.search(r'Citations.*?\((\d+)\)', card_text)
+        if m:
+            citations = int(m.group(1))
         figures = 0
-        fig_match = re.search(r'Figures.*?\((\d+)\)', card.get_text())
-        if fig_match:
-            figures = int(fig_match.group(1))
+        m = re.search(r'Figures.*?\((\d+)\)', card_text)
+        if m:
+            figures = int(m.group(1))
 
         return {
             "antigen_name": antigen_name.upper(),
@@ -608,61 +830,57 @@ def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dic
             "scrape_level": 2,
         }
     except Exception as e:
-        logger.debug(f"Error parsing product card: {e}")
+        logger.debug(f"Card parse error: {e}")
         return None
 
 
-def _parse_listing_text_blocks(soup, antigen_name: str, timestamp: str) -> list[dict]:
+def _parse_listing_by_text(soup, antigen_name: str, timestamp: str) -> list[dict]:
     """
-    Fallback parser: extract products from text content when structured
-    HTML cards aren't found. Uses regex patterns matching the Biocompare
-    listing format visible in the pasted content.
+    Fallback: parse products from page text when structured cards aren't found.
+    Looks for "Applications:" as a marker for each product block.
     """
     products = []
     text = soup.get_text(separator="\n")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
 
-    # Pattern: product names are followed by Applications:, Reactivity:, etc.
     i = 0
     while i < len(lines):
-        # Look for "Applications:" as a marker that we're in a product block
         if lines[i].startswith("Applications:") or lines[i].startswith("Applications"):
-            # Work backwards to find product name (usually 1-3 lines before)
+            # Find product name (look backwards for something that looks like one)
             product_name = ""
             for j in range(max(0, i - 5), i):
                 candidate = lines[j]
-                # Skip navigation/filter text
-                if candidate and len(candidate) > 5 and not candidate.startswith(("Compare", "View All", "See More", "Supplier")):
-                    if "Antibody" in candidate or "antibody" in candidate or "Ab" in candidate:
-                        product_name = candidate
-                        break
+                if (candidate and len(candidate) > 5
+                    and not candidate.startswith(("Compare", "View All", "See More", "Supplier"))
+                    and ("Antibody" in candidate or "antibody" in candidate or "Ab" in candidate)):
+                    product_name = candidate
+                    break
             if not product_name and i > 0:
                 product_name = lines[i - 1]
 
-            # Extract fields from surrounding lines
-            block_text = "\n".join(lines[max(0, i - 3):min(len(lines), i + 15)])
+            block = "\n".join(lines[max(0, i - 3):min(len(lines), i + 15)])
 
-            apps = _extract_field_from_text(block_text, "Applications")
-            reactivity = _extract_field_from_text(block_text, "Reactivity")
-            conjugate = _extract_field_from_text(block_text, "Conjugate/Tag") or _extract_field_from_text(block_text, "Conjugate")
-            quantity = _extract_field_from_text(block_text, "Quantity")
+            apps = _extract_field(block, "Applications")
+            reactivity = _extract_field(block, "Reactivity")
+            conjugate = _extract_field(block, "Conjugate/Tag") or _extract_field(block, "Conjugate")
+            quantity = _extract_field(block, "Quantity")
 
-            # Price
             price = 0.0
-            price_match = re.search(r'\$[\d,]+\.?\d*', block_text)
-            if price_match:
-                price = _parse_price_str(price_match.group())
+            m = re.search(r'\$[\d,]+\.?\d*', block)
+            if m:
+                price = _parse_price_str(m.group())
 
-            # Vendor: look for company names in nearby lines
+            # Vendor: look for company name patterns
             vendor = ""
+            vendor_suffixes = [
+                "Ltd", "Inc.", "LLC", "GmbH", "Biologicals", "Biotech",
+                "Biotechnology", "Scientific", "Sciences", "Systems",
+                "Biosciences", "Bio-Techne", "Solutions", "BioLegend",
+            ]
             for j in range(max(0, i - 5), min(len(lines), i + 15)):
-                # Known vendor patterns (lines that end with common vendor suffixes)
-                if any(suffix in lines[j] for suffix in ["Ltd", "Inc.", "LLC", "GmbH", "Biologicals", "Biotech",
-                                                          "Biotechnology", "Scientific", "Sciences", "Systems",
-                                                          "Biosciences", "Bio-Techne", "Solutions"]):
-                    if len(lines[j]) < 80:  # Vendor names are short
-                        vendor = lines[j].strip()
-                        break
+                if any(s in lines[j] for s in vendor_suffixes) and len(lines[j]) < 80:
+                    vendor = lines[j].strip()
+                    break
 
             if product_name:
                 products.append({
@@ -677,51 +895,25 @@ def _parse_listing_text_blocks(soup, antigen_name: str, timestamp: str) -> list[
                     "scraped_at": timestamp,
                     "scrape_level": 2,
                 })
-
         i += 1
 
     return products
 
 
-def _parse_listing_tables(soup, antigen_name: str, timestamp: str) -> list[dict]:
-    """Fallback: try to parse products from table elements."""
-    products = []
-    for table in soup.select("table"):
-        for row in table.select("tr"):
-            cells = row.select("td, th")
-            if len(cells) >= 3:
-                products.append({
-                    "antigen_name": antigen_name.upper(),
-                    "product_name": cells[0].get_text(strip=True),
-                    "vendor": cells[1].get_text(strip=True) if len(cells) > 1 else "",
-                    "price": _parse_price_str(cells[2].get_text(strip=True)) if len(cells) > 2 else 0,
-                    "scraped_at": timestamp,
-                    "scrape_level": 2,
-                })
-    return products
-
-
 def parse_product_detail(html: str, antigen_name: str) -> Optional[dict]:
     """
-    Parse a product detail page for full specs.
-
-    Based on the pasted content, the detail page has a "Product Specs" section
-    with labeled fields: Item, Company, Price, Catalog Number, Quantity,
-    Applications, Conjugate/Tag, Format, Reactivity, Target, Isotype, Host,
-    Antibody Type, Immunogen, NCBI Full Gene Name, NCBI Gene Aliases,
-    Clonality, Storage.
+    Parse a product DETAIL page (full specs).
+    Fields: Item, Company, Price, Catalog Number, Quantity, Applications,
+    Conjugate/Tag, Format, Reactivity, Target, Isotype, Host, Antibody Type,
+    Immunogen, NCBI Gene Aliases, Clonality, Storage.
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
     now = datetime.now().isoformat()
-
-    # The detail page has labeled fields. Extract them.
     text = soup.get_text(separator="\n")
 
-    # Helper to extract "LabelValue" patterns from the specs section
     def get_spec(label: str) -> str:
-        # Look for patterns like "LabelValue" or "Label: Value" or "Label\nValue"
         for pattern in [
             rf'{label}\s*[:：]\s*(.+?)(?:\n|$)',
             rf'{label}([^\n]+)',
@@ -729,37 +921,30 @@ def parse_product_detail(html: str, antigen_name: str) -> Optional[dict]:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 val = match.group(1).strip()
-                # Clean up: remove trailing labels
-                for next_label in ["Company", "Price", "Catalog", "Quantity", "Applications",
-                                   "Conjugate", "Format", "Reactivity", "Target", "Isotype",
-                                   "Host", "Antibody Type", "Immunogen", "NCBI", "Clonality",
-                                   "Storage", "Supplier"]:
-                    if next_label in val and next_label != label:
-                        val = val[:val.index(next_label)].strip()
+                for nxt in ["Company", "Price", "Catalog", "Quantity", "Applications",
+                            "Conjugate", "Format", "Reactivity", "Target", "Isotype",
+                            "Host", "Antibody Type", "Immunogen", "NCBI", "Clonality",
+                            "Storage", "Supplier"]:
+                    if nxt in val and nxt != label:
+                        val = val[:val.index(nxt)].strip()
                         break
                 return val
         return ""
 
     product_name = get_spec("Item") or get_spec("Product")
     if not product_name:
-        # Try page title
         title = soup.select_one("h1, .product-title, title")
         product_name = title.get_text(strip=True) if title else ""
-
     if not product_name:
         return None
 
-    # Extract price
-    price = 0.0
-    price_str = get_spec("Price")
-    if price_str:
-        price = _parse_price_str(price_str)
+    price = _parse_price_str(get_spec("Price"))
 
     return {
         "antigen_name": antigen_name.upper(),
         "product_name": product_name,
         "vendor": get_spec("Company"),
-        "catalog_no": get_spec("Catalog Number"),
+        "catalog_no": get_spec("Catalog Number") or get_spec("Catalog"),
         "price": price,
         "package_size": get_spec("Quantity"),
         "applications": get_spec("Applications"),
@@ -778,28 +963,10 @@ def parse_product_detail(html: str, antigen_name: str) -> Optional[dict]:
     }
 
 
-# ─── Extraction Helpers ──────────────────────────────────────────────────────
+# ── Helpers ──
 
-def _extract_labeled_field(element, label: str) -> str:
-    """Extract value from a labeled field inside an HTML element."""
-    text = element.get_text(separator="\n")
-    for pattern in [
-        rf'{label}\s*[:：]\s*(.+)',
-        rf'{label}\s*\n\s*(.+)',
-    ]:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            val = match.group(1).strip().split("\n")[0].strip()
-            return val
-    return ""
-
-
-def _extract_field_from_text(text: str, label: str) -> str:
-    """Extract labeled field from raw text block."""
-    for pattern in [
-        rf'{label}\s*[:：]\s*(.+)',
-        rf'{label}\s*\n\s*(.+)',
-    ]:
+def _extract_field(text: str, label: str) -> str:
+    for pattern in [rf'{label}\s*[:：]\s*(.+)', rf'{label}\s*\n\s*(.+)']:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return match.group(1).strip().split("\n")[0].strip()
@@ -807,7 +974,6 @@ def _extract_field_from_text(text: str, label: str) -> str:
 
 
 def _parse_price_str(s: str) -> float:
-    """Parse price string like '$711.00' to float."""
     if not s:
         return 0.0
     cleaned = re.sub(r'[^\d.]', '', s)
@@ -817,185 +983,370 @@ def _parse_price_str(s: str) -> float:
         return 0.0
 
 
-# ─── Main Scraper Orchestration ──────────────────────────────────────────────
+def _find_next_page(soup) -> Optional[str]:
+    """Find the 'next page' link in pagination."""
+    # Direct next links
+    for sel in ["a.next", "a[rel='next']", ".pagination a.next", ".pager a.next"]:
+        link = soup.select_one(sel)
+        if link and link.get("href"):
+            return urljoin(BASE_URL, link["href"])
+
+    # Arrow/text next links
+    for link in soup.select(".pagination a, .pager a, nav a"):
+        text = link.get_text(strip=True)
+        if text in (">", "Next", "»", "next", "›"):
+            href = link.get("href", "")
+            if href:
+                return urljoin(BASE_URL, href)
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCRAPER ORCHESTRATOR (uses ChromeBrowser + parsers + DB)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class BiocompareScraper:
     """
-    Monthly batch scraper for Biocompare antibody catalog.
+    Monthly batch scraper using a visible Chrome browser.
 
-    Usage:
+    Usage (from scripts/run_monthly_scrape.py):
         scraper = BiocompareScraper("db/biocompare_catalog.db")
-        scraper.run_full_scrape()           # Scrape all letters
-        scraper.run_letter_scrape("R")      # Scrape only letter R
-        scraper.run_test_scrape()           # Quick test with 3 antigens
+        scraper.run_test_scrape()
+        scraper.run_letter_scrape("R")
+        scraper.run_full_scrape()
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, headless: bool = False, interactive: bool = False):
+        """
+        Args:
+            db_path: Path to SQLite catalog database.
+            headless: Run Chrome without a visible window (not recommended).
+            interactive: Pause after each page load and wait for Enter.
+        """
         self.db = BiocompareCatalogDB(db_path)
+        self.browser = ChromeBrowser(headless=headless)
+        self.interactive = interactive
         self.total_products = 0
         self.total_antigens = 0
-        self._setup_logging()
+        self._debug_dir = os.path.join(os.path.dirname(db_path), "scrape_debug")
 
-    def _setup_logging(self):
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
-        ))
-        root_logger = logging.getLogger()
-        if not root_logger.handlers:
-            root_logger.addHandler(handler)
-            root_logger.setLevel(logging.INFO)
+    def _fetch(self, url: str) -> str:
+        """Fetch a page — interactive or automatic."""
+        if self.interactive:
+            return self.browser.get_page_interactive(url)
+        else:
+            return self.browser.get_page(url)
 
-    def run_full_scrape(self, deep_scrape: bool = False, max_pages_per_antigen: int = 5):
-        """
-        Full monthly scrape: all letters A-Z + #.
+    def _save_debug(self, name: str, html: str):
+        """Save page HTML for offline debugging if needed."""
+        os.makedirs(self._debug_dir, exist_ok=True)
+        path = os.path.join(self._debug_dir, f"{name}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
 
-        Args:
-            deep_scrape: If True, also fetch individual product detail pages (SLOW).
-            max_pages_per_antigen: Max pagination pages to follow per antigen listing.
-        """
+    # ── Entry points ──
+
+    def run_full_scrape(self, deep: bool = False, max_pages: int = 5):
+        """Scrape all letters A-Z + #."""
         run_id = self.db.start_scrape_run("ALL")
         logger.info("=" * 60)
-        logger.info("Starting FULL Biocompare scrape")
+        logger.info("FULL SCRAPE — Opening Chrome...")
         logger.info("=" * 60)
+        self.browser.start()
 
         try:
             for letter in BROWSE_LETTERS:
-                self._scrape_letter(letter, deep_scrape, max_pages_per_antigen)
-
+                self._scrape_letter(letter, deep, max_pages)
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products)
-            logger.info(f"\nScrape complete: {self.total_antigens} antigens, {self.total_products} products")
-
+            logger.info(f"\n✅ Complete: {self.total_antigens} antigens, {self.total_products} products")
         except KeyboardInterrupt:
-            logger.warning("\nScrape interrupted by user")
+            logger.warning("\n⏹️  Interrupted (progress saved)")
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, "interrupted")
         except Exception as e:
-            logger.error(f"Scrape failed: {e}")
+            logger.error(f"Scrape error: {e}")
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, f"error: {e}")
             raise
+        finally:
+            self.browser.quit()
 
-    def run_letter_scrape(self, letter: str, deep_scrape: bool = False, max_pages: int = 5):
-        """Scrape only antigens starting with a specific letter."""
+    def run_letter_scrape(self, letter: str, deep: bool = False, max_pages: int = 5):
+        """Scrape one letter."""
         run_id = self.db.start_scrape_run(letter.upper())
-        logger.info(f"Scraping Biocompare letter: {letter.upper()}")
+        logger.info(f"Scraping letter {letter.upper()} — Opening Chrome...")
+        self.browser.start()
 
         try:
-            self._scrape_letter(letter.upper(), deep_scrape, max_pages)
+            self._scrape_letter(letter.upper(), deep, max_pages)
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products)
-            logger.info(f"Letter {letter} complete: {self.total_antigens} antigens, {self.total_products} products")
+            logger.info(f"\n✅ Letter {letter}: {self.total_antigens} antigens, {self.total_products} products")
+        except KeyboardInterrupt:
+            logger.warning("\n⏹️  Interrupted (progress saved)")
+            self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, "interrupted")
         except Exception as e:
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, f"error: {e}")
             raise
+        finally:
+            self.browser.quit()
 
     def run_test_scrape(self, max_antigens: int = 3):
-        """Quick test scrape: fetch a few antigens to verify selectors work."""
+        """Quick test: scrape a few antigens from letter R."""
         run_id = self.db.start_scrape_run("TEST")
-        logger.info(f"Running TEST scrape (max {max_antigens} antigens)")
+        logger.info(f"TEST SCRAPE ({max_antigens} antigens) — Opening Chrome...")
+        self.browser.start()
 
         try:
-            # Fetch the R letter page as test
             url = BROWSE_LETTER_URL.format(letter="R")
-            html = _fetch_page(url)
+            html = self._fetch(url)
             if not html:
-                logger.error("Could not fetch browse page — check network/URL")
-                self.db.finish_scrape_run(run_id, 0, 0, "error: fetch failed")
+                logger.error("❌ Could not load browse page. Check your internet connection.")
+                self.db.finish_scrape_run(run_id, 0, 0, "error: no page loaded")
                 return
 
+            # Save for debugging
+            self._save_debug("test_browse_R", html)
+            logger.info(f"📄 Saved page HTML to {self._debug_dir}/test_browse_R.html")
+
             antigens = parse_antigen_index(html)
-            logger.info(f"Found {len(antigens)} antigens on letter R page")
+            if not antigens:
+                logger.warning(
+                    "⚠️  No antigens found on the page. The HTML structure may have changed.\n"
+                    f"    Check the saved HTML: {self._debug_dir}/test_browse_R.html\n"
+                    "    Look for <a> tags with href containing '/pfu/' and '/Antibodies/'\n"
+                    "    Then update parse_antigen_index() in biocompare_scraper.py"
+                )
+                # Save a screenshot too
+                self.browser.save_screenshot(os.path.join(self._debug_dir, "test_browse_R.png"))
+                self.db.finish_scrape_run(run_id, 0, 0, "error: no antigens parsed")
+                return
+
+            logger.info(f"Found {len(antigens)} antigens. Scraping first {max_antigens}...")
 
             for antigen in antigens[:max_antigens]:
-                self._scrape_antigen(antigen, deep_scrape=False, max_pages=1)
+                self._scrape_antigen(antigen, deep=True, max_pages=1)
 
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products)
-            logger.info(f"Test complete: {self.total_antigens} antigens, {self.total_products} products")
+            logger.info(f"\n✅ Test complete: {self.total_antigens} antigens, {self.total_products} products")
 
+        except KeyboardInterrupt:
+            logger.warning("\n⏹️  Interrupted")
+            self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, "interrupted")
         except Exception as e:
+            logger.error(f"Test scrape error: {e}")
             self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, f"error: {e}")
             raise
+        finally:
+            self.browser.quit()
 
-    def _scrape_letter(self, letter: str, deep_scrape: bool, max_pages: int):
-        """Scrape all antigens for a given starting letter."""
+    def run_single_antigen(self, antigen_name: str, listing_url: str, deep: bool = True):
+        """Scrape a single antigen by name + URL. Useful for debugging one target."""
+        run_id = self.db.start_scrape_run(f"SINGLE:{antigen_name}")
+        logger.info(f"Scraping single antigen: {antigen_name}")
+        self.browser.start()
+
+        try:
+            antigen = {"name": antigen_name.upper(), "display_name": antigen_name, "url": listing_url}
+            self._scrape_antigen(antigen, deep=deep, max_pages=5)
+            self.db.finish_scrape_run(run_id, 1, self.total_products)
+            logger.info(f"✅ {antigen_name}: {self.total_products} products")
+        finally:
+            self.browser.quit()
+
+    def run_targets_scrape(
+        self,
+        targets: list[str],
+        antibody_type: str = "primary",
+        vendor_vids: list[str] = None,
+        deep: bool = False,
+        max_pages: int = 3,
+    ) -> dict:
+        """
+        Scrape specific target antigens by searching Biocompare's antibody page.
+
+        For each target:
+          1. Navigates to biocompare.com/Search-Antibodies/ with type + vendor filters
+          2. Types the target name into the search bar (#txtSearch)
+          3. Submits and parses the results page
+          4. Optionally follows pagination and detail links
+
+        Args:
+            targets: List of antigen names (e.g., ["CD3", "Ki67", "GFAP"])
+            antibody_type: "primary", "secondary", or "pairs"
+            vendor_vids: List of Biocompare vendor IDs to filter by
+            deep: Also fetch individual product detail pages
+            max_pages: Max result pages per target
+
+        Returns:
+            dict with per-target results:
+            {"CD3": {"products": 12, "status": "ok"}, ...}
+        """
+        label = ", ".join(t.upper() for t in targets[:5])
+        if len(targets) > 5:
+            label += f" (+{len(targets)-5} more)"
+        run_id = self.db.start_scrape_run(f"TARGETS:{label}")
+        logger.info(f"Searching Biocompare for {len(targets)} targets: {label}")
+        logger.info(f"  Type: {antibody_type}, Vendors: {vendor_vids or 'all'}")
+        self.browser.start()
+
+        # Build the filtered search URL
+        filtered_url = build_search_url(antibody_type, vendor_vids)
+        logger.info(f"  Search URL: {filtered_url}")
+
+        results_summary = {}
+
+        try:
+            for target_name in targets:
+                target_name = target_name.strip()
+                if not target_name:
+                    continue
+
+                logger.info(f"\n  🔍 Searching: {target_name}")
+
+                # Search using the Biocompare search bar on the filtered page
+                html = self.browser.search_biocompare(target_name, search_url=filtered_url)
+
+                if not html:
+                    results_summary[target_name] = {"products": 0, "status": "search_failed"}
+                    continue
+
+                # Save for debugging
+                self._save_debug(f"search_{target_name}", html)
+
+                # Parse search results (same format as product listings)
+                products, next_url = parse_product_listing(html, target_name)
+
+                # Save to DB
+                for p in products:
+                    self.db.upsert_product(p)
+                    self.total_products += 1
+
+                # Follow pagination if there are more pages
+                page_num = 1
+                while next_url and page_num < max_pages:
+                    page_num += 1
+                    logger.info(f"    Page {page_num}...")
+                    html = self._fetch(next_url)
+                    if not html:
+                        break
+                    more_products, next_url = parse_product_listing(html, target_name)
+                    for p in more_products:
+                        self.db.upsert_product(p)
+                        self.total_products += 1
+                    products.extend(more_products)
+
+                # Deep scrape: fetch detail pages for full specs
+                if deep:
+                    for p in products:
+                        detail_url = p.get("detail_url", "")
+                        if detail_url and detail_url.startswith("http"):
+                            self._scrape_detail(detail_url, target_name)
+
+                self.total_antigens += 1
+                self.db.upsert_antigen(
+                    target_name.upper(), target_name, "", len(products)
+                )
+
+                results_summary[target_name] = {
+                    "products": len(products),
+                    "status": "ok" if products else "no_products",
+                }
+
+                logger.info(f"    → {len(products)} products found")
+
+            self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products)
+            logger.info(f"\n✅ Targets scrape complete: {self.total_products} products")
+
+        except KeyboardInterrupt:
+            logger.warning("\n⏹️  Interrupted (progress saved)")
+            self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, "interrupted")
+        except Exception as e:
+            logger.error(f"Targets scrape error: {e}")
+            self.db.finish_scrape_run(run_id, self.total_antigens, self.total_products, f"error: {e}")
+            raise
+        finally:
+            self.browser.quit()
+
+        return results_summary
+
+    # ── Internal methods ──
+
+    def _scrape_letter(self, letter: str, deep: bool, max_pages: int):
         url = BROWSE_LETTER_URL.format(letter=letter)
-        logger.info(f"\n{'─'*40}")
-        logger.info(f"Fetching letter {letter}: {url}")
+        logger.info(f"\n{'─' * 50}")
+        logger.info(f"📖 Letter {letter}: {url}")
 
-        html = _fetch_page(url)
+        html = self._fetch(url)
         if not html:
-            logger.warning(f"Could not fetch letter {letter} page")
-            self.db.log_event("WARNING", f"Failed to fetch letter {letter}", url)
+            logger.warning(f"  ⚠️ Could not load letter {letter}")
             return
 
         antigens = parse_antigen_index(html)
-        logger.info(f"Letter {letter}: {len(antigens)} antigens found")
+        logger.info(f"  Found {len(antigens)} antigens for letter {letter}")
 
         for antigen in antigens:
-            self._scrape_antigen(antigen, deep_scrape, max_pages)
+            self._scrape_antigen(antigen, deep, max_pages)
 
-    def _scrape_antigen(self, antigen: dict, deep_scrape: bool, max_pages: int):
-        """Scrape all products for a single antigen target."""
+    def _scrape_antigen(self, antigen: dict, deep: bool, max_pages: int):
         name = antigen["name"]
         url = antigen["url"]
-        logger.info(f"  Scraping antigen: {name}")
+        logger.info(f"  🎯 {name}")
 
-        # Store antigen
         self.db.upsert_antigen(name, antigen.get("display_name", name), url)
         self.total_antigens += 1
 
-        # Fetch listing pages
         page_num = 1
         current_url = url
-        antigen_products = 0
+        antigen_product_count = 0
 
         while current_url and page_num <= max_pages:
-            html = _fetch_page(current_url)
+            html = self._fetch(current_url)
             if not html:
-                logger.warning(f"  Failed to fetch page {page_num} for {name}")
                 break
+
+            # Save first page of each antigen for debugging
+            if page_num == 1:
+                self._save_debug(f"listing_{name}_p{page_num}", html)
 
             products, next_url = parse_product_listing(html, name)
 
             for product in products:
                 self.db.upsert_product(product)
-                antigen_products += 1
+                antigen_product_count += 1
                 self.total_products += 1
 
-            # Optional deep scrape of individual detail pages
-            if deep_scrape:
+            # Deep scrape: fetch individual detail pages for full specs
+            if deep:
                 for product in products:
                     detail_url = product.get("detail_url", "")
-                    if detail_url:
-                        self._scrape_product_detail(detail_url, name)
+                    if detail_url and detail_url.startswith("http"):
+                        self._scrape_detail(detail_url, name)
 
             current_url = next_url
             page_num += 1
 
-        # Update antigen product count
-        self.db.upsert_antigen(name, antigen.get("display_name", name), url, antigen_products)
-        logger.info(f"  {name}: {antigen_products} products scraped")
+        self.db.upsert_antigen(name, antigen.get("display_name", name), url, antigen_product_count)
+        logger.info(f"     → {antigen_product_count} products")
 
-    def _scrape_product_detail(self, url: str, antigen_name: str):
-        """Scrape a single product detail page for full specs."""
-        html = _fetch_page(url)
+    def _scrape_detail(self, url: str, antigen_name: str):
+        """Fetch + parse a single product detail page."""
+        html = self._fetch(url)
         if not html:
             return
 
         detail = parse_product_detail(html, antigen_name)
         if detail:
             self.db.upsert_product(detail)
+            logger.debug(f"     Detail: {detail.get('product_name', '')[:50]}")
 
 
-# ─── Convenience Functions (for app integration) ────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONVENIENCE FUNCTIONS (used by the main app for instant local search)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def get_catalog_db(db_dir: str | Path = None) -> Optional[BiocompareCatalogDB]:
-    """
-    Get the Biocompare catalog database. Returns None if no catalog exists.
-    Used by the app to check if a local catalog is available.
-    """
+    """Get the local catalog DB, or None if it doesn't exist."""
     if db_dir is None:
-        # Default: look relative to this file
         db_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "db")
-
     db_path = os.path.join(str(db_dir), "biocompare_catalog.db")
     if os.path.exists(db_path):
         return BiocompareCatalogDB(db_path)
@@ -1003,20 +1354,11 @@ def get_catalog_db(db_dir: str | Path = None) -> Optional[BiocompareCatalogDB]:
 
 
 def search_local_catalog(
-    query: str = "",
-    target: str = "",
-    host: str = "",
-    application: str = "",
-    conjugate: str = "",
-    reactivity: str = "",
-    vendor: str = "",
-    max_results: int = 50,
-    db_dir: str | Path = None,
+    query: str = "", target: str = "", host: str = "", application: str = "",
+    conjugate: str = "", reactivity: str = "", vendor: str = "",
+    max_results: int = 50, db_dir: str | Path = None,
 ) -> list[dict]:
-    """
-    Search the local Biocompare catalog.
-    Returns empty list if no catalog exists.
-    """
+    """Search local catalog. Returns empty list if no catalog exists."""
     catalog = get_catalog_db(db_dir)
     if catalog is None:
         return []
@@ -1025,3 +1367,161 @@ def search_local_catalog(
         conjugate=conjugate, reactivity=reactivity, vendor=vendor,
         max_results=max_results,
     )
+
+
+def _find_best_antigen_match(target_name: str, antigens: list[dict]) -> Optional[dict]:
+    """
+    Find the best matching antigen from a browse page for a given target name.
+    Tries exact match first, then prefix, then substring.
+    """
+    name = target_name.upper().strip()
+
+    # Exact match
+    for a in antigens:
+        if a["name"] == name:
+            return a
+
+    # Exact match on display_name (case-insensitive)
+    for a in antigens:
+        if a.get("display_name", "").upper().strip() == name:
+            return a
+
+    # Prefix match (e.g., target "CD3" matches antigen "CD3 / CD3D / CD3E")
+    for a in antigens:
+        if a["name"].startswith(name) or a["name"].startswith(name + " "):
+            return a
+
+    # Substring match (e.g., target "RAB5" matches "RAB5A")
+    for a in antigens:
+        if name in a["name"]:
+            return a
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# run_scrape() — Single callable entry point for CLI and GUI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_scrape(
+    # ── Mode (pick one) ──
+    mode: str = "full",          # "full", "letter", "test", "targets", "url", "stats", "export_csv"
+    # ── Mode-specific params ──
+    letter: str = "R",           # Which letter (mode="letter")
+    targets: list[str] = None,   # Antigen names (mode="targets")
+    url: str = "",               # Single listing URL (mode="url")
+    antigen_name: str = "",      # Name for --url mode
+    # ── Biocompare filters ──
+    antibody_type: str = "primary",  # "primary", "secondary", "pairs"
+    vendor_vids: list[str] = None,   # Biocompare vendor IDs (from vendors.yaml)
+    # ── Scraper options ──
+    headless: bool = False,      # Hide Chrome window
+    interactive: bool = False,   # Pause at each page for manual inspection
+    deep: bool = False,          # Also fetch product detail pages
+    max_pages: int = 5,          # Max listing pages per antigen
+    max_antigens: int = 3,       # Max antigens for test mode
+    # ── Paths ──
+    db_path: str = None,         # Override database path
+) -> dict:
+    """
+    Universal entry point for the Biocompare scraper. Callable from CLI, GUI,
+    or any Python code. Returns a result dict.
+
+    Modes:
+        "full"      — Scrape all letters A-Z (takes hours)
+        "letter"    — Scrape one letter
+        "test"      — Quick test with a few antigens from letter R
+        "targets"   — Scrape specific antigens by name (for panel refresh)
+        "url"       — Scrape a single listing URL
+        "stats"     — Return catalog statistics (no Chrome needed)
+        "export_csv"— Export catalog to CSV (no Chrome needed)
+
+    Returns:
+        dict with keys: "status" (ok/error), "antigens", "products",
+        "message", and mode-specific data.
+
+    Examples:
+        # From GUI — refresh pricing for current panel targets:
+        result = run_scrape(mode="targets", targets=["CD3", "Ki67", "GFAP"], headless=True)
+
+        # From CLI — scrape letter R:
+        result = run_scrape(mode="letter", letter="R")
+
+        # Quick check:
+        result = run_scrape(mode="stats")
+    """
+    # Resolve default DB path
+    if db_path is None:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        db_dir = os.path.join(project_root, "db")
+        os.makedirs(db_dir, exist_ok=True)
+        db_path = os.path.join(db_dir, "biocompare_catalog.db")
+
+    # ── Stats (no browser needed) ──
+    if mode == "stats":
+        db = BiocompareCatalogDB(db_path)
+        stats = db.get_stats()
+        return {"status": "ok", "mode": "stats", **stats}
+
+    # ── Export CSV (no browser needed) ──
+    if mode == "export_csv":
+        db = BiocompareCatalogDB(db_path)
+        csv_dir = os.path.join(os.path.dirname(db_path), "..", "data")
+        os.makedirs(csv_dir, exist_ok=True)
+        csv_path = os.path.join(csv_dir, "biocompare_catalog.csv")
+        db.export_to_csv(csv_path)
+        return {"status": "ok", "mode": "export_csv", "path": csv_path}
+
+    # ── Modes that need Chrome ──
+    scraper = BiocompareScraper(
+        db_path=db_path,
+        headless=headless,
+        interactive=interactive,
+    )
+
+    try:
+        if mode == "test":
+            scraper.run_test_scrape(max_antigens=max_antigens)
+
+        elif mode == "letter":
+            scraper.run_letter_scrape(letter.upper(), deep=deep, max_pages=max_pages)
+
+        elif mode == "targets":
+            if not targets:
+                return {"status": "error", "message": "No targets provided"}
+            summary = scraper.run_targets_scrape(
+                targets, antibody_type=antibody_type,
+                vendor_vids=vendor_vids, deep=deep, max_pages=max_pages,
+            )
+            return {
+                "status": "ok",
+                "mode": "targets",
+                "antigens": scraper.total_antigens,
+                "products": scraper.total_products,
+                "per_target": summary,
+            }
+
+        elif mode == "url":
+            name = antigen_name or url.rstrip("/").split("/")[-1].upper()
+            scraper.run_single_antigen(name, url, deep=deep)
+
+        elif mode == "full":
+            scraper.run_full_scrape(deep=deep, max_pages=max_pages)
+
+        else:
+            return {"status": "error", "message": f"Unknown mode: {mode}"}
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "antigens": scraper.total_antigens,
+            "products": scraper.total_products,
+        }
+
+    return {
+        "status": "ok",
+        "mode": mode,
+        "antigens": scraper.total_antigens,
+        "products": scraper.total_products,
+    }

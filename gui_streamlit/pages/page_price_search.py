@@ -1,70 +1,69 @@
 """
 gui_streamlit/pages/page_price_search.py — Antibody Price Search.
 
-Searches the local Biocompare catalog (populated by monthly batch scrape).
-Falls back to manual entry if catalog is empty.
+Searches the local Biocompare catalog. Wishlist button on results.
+Redirects to Scraper page if no results found.
 """
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 
 
 def render():
-    from gui_streamlit.shared import get_db_manager, load_config
-    from core.scraper import search as scraper_search, create_manual_price_result, get_catalog_stats
-    from core.models import PriceResult
+    from gui_streamlit.shared import get_db_manager
+    from core.scraper import search as scraper_search, get_catalog_stats
+    from core.wishlist import add_to_wishlist
 
-    config = load_config()
+    db = get_db_manager()
 
     st.title("💰 Antibody Price Search")
 
-    # ─── Catalog Status Banner ────────────────────────────────────────
+    # ─── Catalog Status ─────────────────────────────────────────────
     stats = get_catalog_stats()
     if stats and stats.get("product_count", 0) > 0:
         last = stats.get("last_scrape")
         last_date = last.get("started_at", "Unknown")[:10] if last else "Unknown"
         st.caption(
             f"📚 Local catalog: **{stats['product_count']:,}** products, "
-            f"**{stats['antigen_count']:,}** antigens, "
-            f"**{stats['vendor_count']:,}** vendors  "
-            f"(last updated: {last_date})"
+            f"**{stats['antigen_count']:,}** antigens  |  "
+            f"Last updated: {last_date}"
         )
     else:
-        st.warning(
-            "⚠️ No local Biocompare catalog found. Run the monthly scraper to populate it:\n\n"
-            "```\npython scripts/run_monthly_scrape.py --test\n```\n\n"
-            "In the meantime, you can use manual entry below."
-        )
+        st.warning("Local catalog is empty. Use the **Scraper** page to fetch antibodies first.")
 
-    # ─── Search Bar ──────────────────────────────────────────────────
-    col1, col2 = st.columns([4, 1])
-    with col1:
+    # ─── Search Bar ─────────────────────────────────────────────────
+    sc1, sc2 = st.columns([4, 1])
+    with sc1:
         query = st.text_input(
             "Search antibodies",
             value=st.session_state.price_search_query,
-            placeholder="e.g., CD3, RAB5, Ki67, GFAP...",
+            placeholder="e.g., CD3, Ki67, GFAP, Vimentin...",
         )
         st.session_state.price_search_query = query
-    with col2:
+    with sc2:
         st.write("")
         search_btn = st.button("🔍 Search", type="primary", use_container_width=True)
 
-    # ─── Filters ─────────────────────────────────────────────────────
+    # ─── Filters ────────────────────────────────────────────────────
     with st.expander("🔽 Filters"):
         fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1:
-            host_filter = st.selectbox("Host Species", ["Any", "Rabbit", "Mouse", "Goat", "Rat", "Human"])
+            host_filter = st.selectbox("Host Species",
+                ["Any", "Rabbit", "Mouse", "Goat", "Rat", "Human", "Chicken", "Donkey"])
         with fc2:
-            app_filter = st.selectbox("Application", ["Any", "IF", "IHC", "ICC", "FC", "WB", "ELISA", "IP"])
+            app_filter = st.selectbox("Application",
+                ["Any", "IF", "IHC", "ICC", "FC", "WB", "ELISA", "IP"])
         with fc3:
-            conjugate_filter = st.text_input("Conjugate", "", placeholder="e.g., AF647, FITC, Unconjugated")
+            conjugate_filter = st.text_input("Conjugate", "", placeholder="e.g., AF647, FITC")
         with fc4:
-            reactivity_filter = st.selectbox("Reactivity", ["Any", "Human", "Mouse", "Rat"])
+            reactivity_filter = st.selectbox("Reactivity",
+                ["Any", "Human", "Mouse", "Rat", "Rabbit"])
 
-        sort_by = st.radio("Sort by", ["Price (Low → High)", "Price (High → Low)", "Product Name"], horizontal=True)
+        sort_by = st.radio("Sort by",
+            ["Price (Low → High)", "Price (High → Low)", "Product Name"],
+            horizontal=True)
 
-    # ─── Execute Search ──────────────────────────────────────────────
+    # ─── Execute Search ─────────────────────────────────────────────
     if search_btn and query:
         with st.spinner("Searching local catalog..."):
             results = scraper_search(
@@ -78,21 +77,24 @@ def render():
 
             if results:
                 st.session_state.price_results = results
-                st.success(f"Found {len(results)} results in local catalog.")
+                st.success(f"Found {len(results)} results.")
             else:
-                st.warning(
-                    "No results found. The local catalog may not contain this target. "
-                    "Try a different search term or use manual entry below."
-                )
                 st.session_state.price_results = []
+                # No results — offer to scrape
+                st.warning(f"No results found for **{query}** in the local catalog.")
+                st.caption("This target may not have been scraped yet.")
+                if st.button("🌐 Scrape Biocompare for this target →", type="primary"):
+                    st.session_state.scrape_targets = query
+                    st.session_state.nav_page = "Scraper"
+                    st.rerun()
 
-    # ─── Results Table ───────────────────────────────────────────────
+    # ─── Results Table ──────────────────────────────────────────────
     results = st.session_state.get("price_results", [])
 
     if results:
         st.subheader(f"Results ({len(results)})")
 
-        # Apply post-search filters
+        # Post-filter
         filtered = results
         if host_filter != "Any":
             filtered = [r for r in filtered if host_filter.lower() in r.host_species.lower()]
@@ -112,6 +114,7 @@ def render():
             filtered.sort(key=lambda r: r.product_name.lower())
 
         if filtered:
+            # Scrollable results table
             df = pd.DataFrame([
                 {
                     "Product": r.product_name[:70] if r.product_name else f"Anti-{r.target}",
@@ -127,58 +130,38 @@ def render():
                 }
                 for r in filtered
             ])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, use_container_width=True, hide_index=True, height=400)
 
-            # Action buttons per result
-            for i, r in enumerate(filtered[:20]):  # Limit buttons to first 20
-                cols = st.columns([3, 1, 1])
+            # Wishlist buttons per result
+            for i, r in enumerate(filtered[:30]):
+                cols = st.columns([4, 1, 1])
                 with cols[0]:
-                    st.caption(f"{r.vendor} — {r.catalog_no or 'N/A'} — {r.product_name[:50]}")
+                    st.caption(
+                        f"{r.vendor} — {r.catalog_no or 'N/A'} — "
+                        f"{r.product_name[:50]}"
+                    )
                 with cols[1]:
-                    if st.button("📦 Add to Inventory", key=f"inv_{i}"):
-                        st.session_state.nav_page = "Inventory"
-                        st.session_state["prefill_antibody"] = {
-                            "name": r.product_name,
-                            "target": r.target,
-                            "vendor": r.vendor,
-                            "catalog_no": r.catalog_no,
-                            "host_species": r.host_species,
-                            "conjugate": r.conjugate,
-                            "isotype": r.isotype,
-                            "clonality": r.clonality,
-                        }
-                        st.rerun()
+                    if st.button("🛒 Add to Wishlist", key=f"wish_{i}"):
+                        with db.inventory_session() as session:
+                            add_to_wishlist(
+                                session,
+                                product_name=r.product_name,
+                                target=r.target,
+                                vendor=r.vendor,
+                                catalog_no=r.catalog_no,
+                                host_species=r.host_species,
+                                isotype=r.isotype,
+                                clonality=r.clonality,
+                                conjugate=r.conjugate,
+                                applications=", ".join(r.validated_applications) if r.validated_applications else "",
+                                reactivity=", ".join(r.reactivity) if r.reactivity else "",
+                                price=r.price,
+                                package_size=r.package_size,
+                                url=r.url,
+                            )
+                        st.success(f"Added to wishlist!")
                 with cols[2]:
                     if r.url:
                         st.link_button("🔗 View", r.url)
         else:
-            st.info("No results match your filters. Try broadening the filter criteria.")
-
-    # ─── Manual Entry Fallback ───────────────────────────────────────
-    st.divider()
-    with st.expander("✏️ Manual Price Entry"):
-        st.caption("Enter antibody pricing details manually.")
-        with st.form("manual_price"):
-            mc1, mc2 = st.columns(2)
-            with mc1:
-                m_target = st.text_input("Target", value=query.split()[0] if query else "")
-                m_vendor = st.text_input("Vendor")
-                m_catalog = st.text_input("Catalog #")
-                m_host = st.text_input("Host Species")
-            with mc2:
-                m_price = st.number_input("Price ($)", min_value=0.0, step=10.0)
-                m_size = st.text_input("Package Size", placeholder="e.g., 100 µg")
-                m_url = st.text_input("Product URL")
-                m_conjugate = st.text_input("Conjugate", placeholder="e.g., Unconjugated, AF647")
-
-            if st.form_submit_button("Add Manual Entry"):
-                manual = create_manual_price_result(
-                    target=m_target, vendor=m_vendor, catalog_no=m_catalog,
-                    price=m_price, package_size=m_size, url=m_url,
-                    host_species=m_host, conjugate=m_conjugate,
-                )
-                current_results = st.session_state.get("price_results", [])
-                current_results.append(manual)
-                st.session_state.price_results = current_results
-                st.success("Manual entry added.")
-                st.rerun()
+            st.info("No results match your filters.")

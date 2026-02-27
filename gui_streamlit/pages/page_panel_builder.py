@@ -206,6 +206,47 @@ def render():
 
         st.caption("For each target, select a primary antibody from inventory or mark for purchase.")
 
+        # ── Refresh prices for panel targets ──
+        target_names = [t.target_name for t in panel.targets if t.target_name]
+        if target_names:
+            with st.expander("🔄 Refresh Biocompare pricing for these targets"):
+                st.caption(f"Targets: **{', '.join(target_names)}**")
+                rc1, rc2 = st.columns([3, 1])
+                with rc1:
+                    refresh_headless = st.checkbox("Headless Chrome", value=False, key="pb_headless")
+                with rc2:
+                    refresh_deep = st.checkbox("Deep scrape", value=False, key="pb_deep")
+
+                if st.button("🚀 Fetch fresh prices", key="pb_refresh_btn"):
+                    try:
+                        import selenium  # noqa: F401
+                        from core.biocompare_scraper import run_scrape
+
+                        progress = st.empty()
+                        progress.info(f"Opening Chrome to fetch: {', '.join(target_names)}...")
+
+                        result = run_scrape(
+                            mode="targets",
+                            targets=target_names,
+                            headless=refresh_headless,
+                            deep=refresh_deep,
+                            max_pages=3,
+                        )
+
+                        progress.empty()
+
+                        if result["status"] == "ok":
+                            total = result.get("products", 0)
+                            st.success(f"✅ Found {total} products. Check Price Search page for details.")
+                            for t, info in result.get("per_target", {}).items():
+                                icon = "✅" if info["status"] == "ok" and info["products"] > 0 else "⚠️"
+                                st.caption(f"  {icon} **{t}**: {info['products']} products")
+                        else:
+                            st.error(f"Error: {result.get('message', 'unknown')}")
+
+                    except ImportError:
+                        st.error("Selenium not installed. Run: `pip install selenium webdriver-manager`")
+
         for i, target in enumerate(panel.targets):
             with st.expander(f"🎯 {target.target_name} ({target.expression_level.value})", expanded=True):
                 # Check inventory

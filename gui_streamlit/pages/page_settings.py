@@ -21,9 +21,10 @@ def render():
 
     st.title("⚙️ Settings")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🏷️ Lab Identity",
         "🔬 Instrument Profiles",
+        "🏢 Vendors",
         "🌐 Scraping",
         "💾 Cache",
         "🌈 Fluorophores",
@@ -118,8 +119,95 @@ def render():
                     else:
                         st.error("Name and channels required.")
 
-    # ─── Tab 3: Scraping Preferences ─────────────────────────────────
+    # ─── Tab 3: Vendor Management ─────────────────────────────────
     with tab3:
+        st.subheader("Approved Vendors")
+        st.caption(
+            "Manage Biocompare vendor IDs. Enabled vendors are pre-selected "
+            "on the Scraper page. You can add new vendors by finding their "
+            "`vids=` number in Biocompare URLs."
+        )
+
+        vendors_config = _load_vendors()
+        vendor_list = vendors_config.get("vendors", [])
+
+        if vendor_list:
+            import pandas as pd
+            vdf = pd.DataFrame([
+                {
+                    "Enabled": "✅" if v.get("enabled") else "❌",
+                    "Vendor": v["name"],
+                    "Biocompare VID": v["vid"],
+                }
+                for v in vendor_list
+            ])
+            st.dataframe(vdf, use_container_width=True, hide_index=True)
+
+            # Toggle enable/disable
+            st.caption("**Toggle vendors:**")
+            changed = False
+            cols_per_row = 3
+            for row_start in range(0, len(vendor_list), cols_per_row):
+                row_vendors = vendor_list[row_start:row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for j, v in enumerate(row_vendors):
+                    with cols[j]:
+                        new_val = st.checkbox(
+                            v["name"],
+                            value=v.get("enabled", False),
+                            key=f"vendor_toggle_{v['vid']}",
+                        )
+                        if new_val != v.get("enabled", False):
+                            v["enabled"] = new_val
+                            changed = True
+
+            if changed:
+                _save_vendors(vendors_config)
+                st.success("Vendor settings updated!")
+                st.rerun()
+
+        # Add new vendor
+        st.divider()
+        st.caption("**Add a new vendor:**")
+        with st.form("add_vendor"):
+            nv1, nv2 = st.columns(2)
+            with nv1:
+                new_name = st.text_input("Vendor Name", placeholder="e.g., Santa Cruz Biotechnology")
+            with nv2:
+                new_vid = st.text_input(
+                    "Biocompare VID",
+                    placeholder="e.g., 100123",
+                    help="Find this in the `&vids=` parameter of a Biocompare search URL",
+                )
+            new_enabled = st.checkbox("Enable by default", value=True)
+
+            if st.form_submit_button("➕ Add Vendor"):
+                if new_name and new_vid:
+                    # Check for duplicates
+                    existing_vids = [v["vid"] for v in vendor_list]
+                    if new_vid in existing_vids:
+                        st.error(f"VID {new_vid} already exists.")
+                    else:
+                        vendor_list.append({
+                            "name": new_name,
+                            "vid": new_vid,
+                            "enabled": new_enabled,
+                        })
+                        _save_vendors(vendors_config)
+                        st.success(f"Added {new_name} (VID: {new_vid})")
+                        st.rerun()
+                else:
+                    st.error("Both name and VID are required.")
+
+        # Antibody type reference
+        st.divider()
+        st.caption("**Biocompare Antibody Type IDs (reference):**")
+        ab_types = vendors_config.get("antibody_types", {})
+        for key, info in ab_types.items():
+            st.caption(f"  `{key}` → soids={info.get('soids', '?')} ({info.get('label', '')})")
+
+    # ─── Tab 4: Scraping Preferences ─────────────────────────────────
+    with tab4:
         st.subheader("Web Scraping Preferences")
 
         scraping = config.get("scraping", {})
@@ -153,8 +241,8 @@ def render():
                 _save_config(config)
                 st.success("Scraping settings saved!")
 
-    # ─── Tab 4: Cache Management ─────────────────────────────────────
-    with tab4:
+    # ─── Tab 5: Cache Management ─────────────────────────────────────
+    with tab5:
         st.subheader("Price Cache Management")
 
         with db.cache_session() as session:
@@ -181,8 +269,8 @@ def render():
                 st.success(f"Cleared {count} entries.")
                 st.rerun()
 
-    # ─── Tab 5: Fluorophore Database ─────────────────────────────────
-    with tab5:
+    # ─── Tab 6: Fluorophore Database ─────────────────────────────────
+    with tab6:
         st.subheader("Fluorophore Database")
 
         if st.button("🔄 Reload from YAML"):
@@ -223,3 +311,21 @@ def _save_profiles(profiles: dict):
     profiles_path = os.path.join(project_root, "data", "instrument_profiles.yaml")
     with open(profiles_path, "w") as f:
         yaml.dump({"profiles": profiles}, f, default_flow_style=False)
+
+
+def _load_vendors() -> dict:
+    """Load vendors.yaml."""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(project_root, "data", "vendors.yaml")
+    if os.path.exists(path):
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    return {"antibody_types": {}, "vendors": []}
+
+
+def _save_vendors(vendors_config: dict):
+    """Save vendors.yaml."""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(project_root, "data", "vendors.yaml")
+    with open(path, "w") as f:
+        yaml.dump(vendors_config, f, default_flow_style=False)

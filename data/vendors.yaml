@@ -1,0 +1,66 @@
+# Biocompare vendor registry.
+# Each vendor has a name and a Biocompare vids number for URL filtering.
+# URL pattern: https://www.biocompare.com/Search-Antibodies/?said=0&soids={type_id}&vids={vid1},{vid2},...
+#
+# To find a new vendor's vid: search on Biocompare, click the vendor filter,
+# and look at the &vids= parameter in the URL.
+
+# Antibody type IDs (soids parameter)
+antibody_types:
+  primary:
+    soids: "269752"
+    label: "Primary Antibodies"
+  secondary:
+    soids: "218589"
+    label: "Secondary Antibodies"
+  pairs:
+    soids: "2318295"
+    label: "Antibody Pairs"
+
+# Approved vendors
+vendors:
+  - name: "Abcam"
+    vid: "100436"
+    enabled: true
+  - name: "Aviva Systems Biology"
+    vid: "100613"
+    enabled: true
+  - name: "BioLegend"
+    vid: "100041"
+    enabled: true
+  - name: "Bio-Rad"
+    vid: "100631"
+    enabled: true
+  - name: "Jackson ImmunoResearch Laboratories, Inc."
+    vid: "100388"
+    enabled: true
+  - name: "SouthernBiotech"
+    vid: "100011"
+    enabled: true
+  - name: "Thermo Fisher Scientific"
+    vid: "100162"
+    enabled: true
+  - name: "United States Biological"
+    vid: "100380"
+    enabled: true
+  - name: "Cell Signaling Technology"
+    vid: "100192"
+    enabled: false
+  - name: "R&D Systems"
+    vid: "100014"
+    enabled: false
+  - name: "Sigma-Aldrich / MilliporeSigma"
+    vid: "100003"
+    enabled: false
+  - name: "Proteintech"
+    vid: "100547"
+    enabled: false
+  - name: "Novus Biologicals"
+    vid: "100141"
+    enabled: false
+  - name: "BD Biosciences"
+    vid: "100035"
+    enabled: false
+  - name: "GeneTex"
+    vid: "100416"
+    enabled: false

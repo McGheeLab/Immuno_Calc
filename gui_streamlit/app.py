@@ -1,20 +1,21 @@
 """
 gui_streamlit/app.py — Main Streamlit entry point.
 
-Sidebar navigation, session state initialization, and page routing.
-Run with: streamlit run gui_streamlit/app.py
+Horizontal tab navigation. No sidebar page list.
+Run with: python run_app.py
 """
+
+import os
+import sys
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_THIS_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import streamlit as st
 
-# shared.py handles sys.path setup and provides cached resources
-from gui_streamlit.shared import (
-    load_config,
-    load_instrument_profiles,
-    get_db_manager,
-    PROJECT_ROOT,
-)
-
+from gui_streamlit.shared import load_config, get_db_manager
 
 # ─── Page Configuration ──────────────────────────────────────────────────────
 
@@ -22,7 +23,7 @@ st.set_page_config(
     page_title="IF Panel Designer",
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 
@@ -43,6 +44,8 @@ def init_session_state():
         "price_results": [],
         "proto_current": None,
         "nav_page": "Dashboard",
+        "scrape_targets": "",
+        "scrape_antibody_type": "primary",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -52,76 +55,65 @@ def init_session_state():
 init_session_state()
 
 
-# ─── Sidebar Navigation ─────────────────────────────────────────────────────
+# ─── Navigation ──────────────────────────────────────────────────────────────
 
-def render_sidebar():
-    config = load_config()
+PAGES = {
+    "Dashboard": "📊",
+    "Inventory": "📦",
+    "Catalog": "📚",
+    "Panel Builder": "🧪",
+    "Price Search": "💰",
+    "Scraper": "🌐",
+    "Wishlist": "🛒",
+    "Protocol": "📄",
+    "Settings": "⚙️",
+}
 
-    st.sidebar.markdown("# 🔬 IF Panel Designer")
-    st.sidebar.caption(f"Lab: {config.get('lab', {}).get('name', 'My Lab')}")
-    st.sidebar.divider()
-
-    pages = {
-        "Dashboard": "📊",
-        "Inventory": "📦",
-        "Panel Builder": "🧪",
-        "Price Search": "💰",
-        "Protocol": "📄",
-        "Settings": "⚙️",
-    }
-
-    for page_name, icon in pages.items():
-        if st.sidebar.button(
+# Top navigation bar
+cols = st.columns(len(PAGES))
+for col, (page_name, icon) in zip(cols, PAGES.items()):
+    with col:
+        is_active = st.session_state.nav_page == page_name
+        if st.button(
             f"{icon} {page_name}",
             use_container_width=True,
-            type="primary" if st.session_state.nav_page == page_name else "secondary",
+            type="primary" if is_active else "secondary",
+            key=f"nav_{page_name}",
         ):
             st.session_state.nav_page = page_name
             st.rerun()
 
-    st.sidebar.divider()
-
-    # Active instrument profile indicator
-    st.sidebar.caption(f"🔧 Profile: {st.session_state.active_profile}")
-
-    # Quick stats
-    db = get_db_manager()
-    with db.inventory_session() as session:
-        from core.inventory import get_inventory_summary
-        summary = get_inventory_summary(session)
-        st.sidebar.metric("Antibodies in Stock", summary["total_antibodies"])
-        if summary["expired_count"] > 0:
-            st.sidebar.error(f"⚠️ {summary['expired_count']} expired")
-        if summary["low_stock_count"] > 0:
-            st.sidebar.warning(f"📉 {summary['low_stock_count']} low stock")
-
-
-render_sidebar()
+st.divider()
 
 
 # ─── Page Router ─────────────────────────────────────────────────────────────
 
-def render_page():
-    page = st.session_state.nav_page
+page = st.session_state.nav_page
 
-    if page == "Dashboard":
-        from gui_streamlit.pages.page_dashboard import render
-        render()
-    elif page == "Inventory":
-        from gui_streamlit.pages.page_inventory import render
-        render()
-    elif page == "Panel Builder":
-        from gui_streamlit.pages.page_panel_builder import render
-        render()
-    elif page == "Price Search":
-        from gui_streamlit.pages.page_price_search import render
-        render()
-    elif page == "Protocol":
-        from gui_streamlit.pages.page_protocol import render
-        render()
-    elif page == "Settings":
-        from gui_streamlit.pages.page_settings import render
-        render()
-
-
-render_page()
+if page == "Dashboard":
+    from gui_streamlit.pages.page_dashboard import render
+    render()
+elif page == "Inventory":
+    from gui_streamlit.pages.page_inventory import render
+    render()
+elif page == "Catalog":
+    from gui_streamlit.pages.page_catalog import render
+    render()
+elif page == "Panel Builder":
+    from gui_streamlit.pages.page_panel_builder import render
+    render()
+elif page == "Price Search":
+    from gui_streamlit.pages.page_price_search import render
+    render()
+elif page == "Scraper":
+    from gui_streamlit.pages.page_scraper import render
+    render()
+elif page == "Wishlist":
+    from gui_streamlit.pages.page_wishlist import render
+    render()
+elif page == "Protocol":
+    from gui_streamlit.pages.page_protocol import render
+    render()
+elif page == "Settings":
+    from gui_streamlit.pages.page_settings import render
+    render()

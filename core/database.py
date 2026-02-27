@@ -96,6 +96,31 @@ class SavedProtocolORM(Base):
     version = Column(String, default="1.0")
 
 
+class WishlistItemORM(Base):
+    """Antibodies we want to purchase but haven't ordered yet."""
+    __tablename__ = "wishlist_items"
+
+    id = Column(String, primary_key=True)
+    product_name = Column(String, default="")
+    target = Column(String, index=True, default="")
+    vendor = Column(String, default="")
+    catalog_no = Column(String, default="")
+    host_species = Column(String, default="")
+    isotype = Column(String, default="")
+    clonality = Column(String, default="")
+    conjugate = Column(String, default="")
+    applications = Column(Text, default="")          # comma-separated
+    reactivity = Column(Text, default="")             # comma-separated
+    price = Column(Float, default=0)
+    package_size = Column(String, default="")
+    url = Column(String, default="")
+    antibody_type = Column(String, default="primary") # primary / secondary / pair
+    notes = Column(Text, default="")
+    priority = Column(String, default="normal")       # low / normal / high / urgent
+    added_at = Column(DateTime, default=datetime.now)
+    status = Column(String, default="wishlist")       # wishlist / ordered / received
+
+
 # ─── Price Cache ORM ────────────────────────────────────────────────────────
 
 class PriceCacheBase(DeclarativeBase):
