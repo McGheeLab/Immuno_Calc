@@ -31,7 +31,7 @@ MODE = "test"               # Quick test — 3 antigens from letter R
 # MODE = "export_csv"       # Export catalog to CSV (no Chrome)
 
 # ── Targets (used when MODE = "targets") ──
-# Builds a direct search URL per target (e.g. /Search-Antibodies/?search=CD3&said=0&soids=269752)
+# Opens biocompare.com/Antibodies/, types each name into the search bar, parses results
 TARGETS = ["CD3", "Ki67", "GFAP"]
 
 # ── Letter (used when MODE = "letter") ──

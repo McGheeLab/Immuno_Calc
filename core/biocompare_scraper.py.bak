@@ -21,8 +21,6 @@ URL STRUCTURE (Biocompare):
     Letter page:     /1997-BrowseCategory/browse/gb1/9776/{LETTER}/0/0
     Product listing: /pfu/110447/soids/{ID}/Antibodies/{ANTIGEN}
     Product detail:  individual product page (linked from listing)
-    Direct search:   /Search-Antibodies/?search={QUERY}&said=0&soids={TYPE_ID}&vids={VENDOR_IDS}
-                     (used by run_targets_scrape — no DOM interaction needed)
 """
 
 from __future__ import annotations
@@ -68,34 +66,17 @@ BROWSE_LETTERS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["#"]
 def build_search_url(
     antibody_type: str = "",
     vendor_vids: list[str] = None,
-    search_term: str = "",
 ) -> str:
     """
-    Build a Biocompare filtered search URL with optional search term.
-
-    When search_term is provided, the URL goes directly to search results —
-    no need to interact with the search bar DOM. This is the preferred
-    approach for targeted scraping.
+    Build a Biocompare filtered search URL.
 
     Examples:
         build_search_url("primary")
         → https://www.biocompare.com/Search-Antibodies/?said=0&soids=269752
-
-        build_search_url("primary", search_term="ki67")
-        → https://www.biocompare.com/Search-Antibodies/?search=ki67&said=0&soids=269752
-
-        build_search_url("primary", ["100436"], search_term="ki67")
-        → https://www.biocompare.com/Search-Antibodies/?search=ki67&said=0&soids=269752&vids=100436
-
         build_search_url("secondary", ["100436", "100041"])
         → https://www.biocompare.com/Search-Antibodies/?said=0&soids=218589&vids=100436,100041
     """
-    from urllib.parse import quote
-
-    params = []
-    if search_term:
-        params.append(f"search={quote(search_term)}")
-    params.append("said=0")
+    params = ["said=0"]
     if antibody_type and antibody_type in ANTIBODY_TYPE_SOIDS:
         params.append(f"soids={ANTIBODY_TYPE_SOIDS[antibody_type]}")
     if vendor_vids:
@@ -388,10 +369,6 @@ class ChromeBrowser:
 
         options = Options()
 
-        # Don't wait for all resources (images, ads, trackers) to load.
-        # "eager" = ready after DOMContentLoaded, which is enough for scraping.
-        options.page_load_strategy = "eager"
-
         if self.headless:
             options.add_argument("--headless=new")
 
@@ -474,56 +451,28 @@ class ChromeBrowser:
         self,
         query: str,
         search_url: str = "",
-        antibody_type: str = "primary",
-        vendor_vids: list[str] = None,
         wait_seconds: float = PAGE_LOAD_DELAY,
     ) -> str:
         """
-        Search Biocompare for antibodies by navigating directly to a URL
-        with the search term baked in as a query parameter.
+        Search Biocompare for antibodies. Navigates to the search page,
+        types the query into the search bar, clicks Search, returns results.
 
-        This avoids all DOM interaction with the ASP.NET search bar, which
-        is fragile and breaks when Biocompare changes their page structure.
-
-        URL pattern:
-            /Search-Antibodies/?search=ki67&said=0&soids=269752&vids=100436
-
-        Args:
-            query: Search term (e.g., "ki67", "CD3", "GFAP")
-            search_url: Pre-built full URL (if provided, used as-is).
-                        If empty, builds URL from antibody_type + vendor_vids.
-            antibody_type: "primary", "secondary", or "pairs" (used if search_url is empty)
-            vendor_vids: Vendor filter IDs (used if search_url is empty)
-            wait_seconds: Time to wait for page to render
-
-        Returns:
-            Page source HTML string, or "" on failure.
+        Actual page elements (as of 2025):
+          Search input:  <input id="ctl06_ctl12_ctl00_txtSearch" class="span2 txtSearch textbox">
+          Search button: <input id="ctl06_ctl12_ctl00_btnProductSearch" class="button search btnProductSearch" type="button">
         """
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
-        from selenium.common.exceptions import TimeoutException
 
-        # Build the full URL with search term included
-        if search_url:
-            # search_url already has the search term baked in
-            target_url = search_url
-        else:
-            # Build from scratch with search term
-            target_url = build_search_url(
-                antibody_type=antibody_type,
-                vendor_vids=vendor_vids,
-                search_term=query,
-            )
+        target_page = search_url or ANTIBODY_SEARCH_URL
 
         try:
-            # ── Navigate directly to search results ───────────────────
-            logger.info(f"  Navigating to: {target_url}")
-            try:
-                self.driver.get(target_url)
-            except TimeoutException:
-                logger.warning("  Page load timed out — continuing with partial page")
-            time.sleep(wait_seconds + 2)  # Let remaining JS render
+            # ── Navigate ──────────────────────────────────────────────
+            logger.info(f"  Navigating to {target_page}")
+            self.driver.get(target_page)
+            time.sleep(wait_seconds + 2)  # Extra time for ASP.NET page to render
 
             # ── Dismiss cookie consent / overlays if present ──────────
             for dismiss_sel in [
@@ -541,14 +490,112 @@ class ChromeBrowser:
                 except Exception:
                     continue
 
-            # ── Wait for results to load ──────────────────────────────
+            # ── Find search input ─────────────────────────────────────
+            # The ID contains ASP.NET control path — use class or ends-with
+            search_box = None
+            input_selectors = [
+                "input.txtSearch",                          # class match
+                "input[id$='_txtSearch']",                  # ID ends with _txtSearch
+                "#ctl06_ctl12_ctl00_txtSearch",             # exact ID from page
+                "input[name$='txtSearch']",                 # name ends with txtSearch
+                "#txtSearch",                               # simple ID (other pages)
+                "input.textbox[type='text']",               # generic textbox
+            ]
+
+            for selector in input_selectors:
+                try:
+                    search_box = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                    if search_box:
+                        logger.info(f"  ✅ Found search input: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            if not search_box:
+                # Debug: save page source and screenshot
+                self._save_debug_state("search_input_not_found")
+                logger.error("  ❌ Could not find search input. Debug files saved.")
+                return ""
+
+            # Scroll into view and click to focus
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'}); arguments[0].focus();",
+                search_box,
+            )
+            time.sleep(0.5)
+
+            # Clear and type
+            search_box.clear()
+            time.sleep(0.3)
+            search_box.send_keys(query)
+            time.sleep(0.5)
+            logger.info(f"  Typed: {query}")
+
+            # ── Find and click Search button ──────────────────────────
+            # type="button" means it's JS-driven, not a form submit
+            search_btn = None
+            btn_selectors = [
+                "input.btnProductSearch",                   # class match
+                "input[id$='_btnProductSearch']",           # ID ends with
+                "#ctl06_ctl12_ctl00_btnProductSearch",      # exact ID from page
+                "input[name$='btnProductSearch']",          # name ends with
+                "input.button.search",                      # compound class
+                "input[value='Search']",                    # by value text
+            ]
+
+            for selector in btn_selectors:
+                try:
+                    search_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    if search_btn:
+                        logger.info(f"  ✅ Found search button: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            if search_btn:
+                # Scroll button into view
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", search_btn
+                )
+                time.sleep(0.3)
+
+                # Try normal click first
+                try:
+                    search_btn.click()
+                    logger.info("  Clicked search button (normal click)")
+                except Exception as click_err:
+                    # Fallback: JavaScript click (bypasses overlays)
+                    logger.info(f"  Normal click failed ({click_err}), trying JS click")
+                    self.driver.execute_script("arguments[0].click();", search_btn)
+                    logger.info("  Clicked search button (JS click)")
+            else:
+                # No button found — try Enter key, then try JS to trigger ASP.NET postback
+                logger.warning("  ⚠️ Search button not found, trying alternatives")
+                try:
+                    # Try triggering the ASP.NET __doPostBack directly
+                    self.driver.execute_script(
+                        "if (typeof __doPostBack === 'function') {"
+                        "  __doPostBack('ctl06$ctl12$ctl00$btnProductSearch','');"
+                        "}"
+                    )
+                    logger.info("  Triggered __doPostBack")
+                except Exception:
+                    search_box.send_keys(Keys.RETURN)
+                    logger.info("  Pressed Enter as final fallback")
+
+            # ── Wait for results ──────────────────────────────────────
             logger.info("  Waiting for results to load...")
+            time.sleep(wait_seconds + 3)
+
+            # Wait for either product results or "no results" message
             try:
                 WebDriverWait(self.driver, 10).until(
-                    lambda d: d.find_elements(By.CSS_SELECTOR,
-                        ".productList, .productRow, "
-                        ".product-listing, .search-result, table.results, "
-                        ".no-results, .product-item")
+                    lambda d: (
+                        d.find_elements(By.CSS_SELECTOR, ".product-listing, .search-result, table.results, .no-results, .product-item")
+                        or "results" in d.page_source.lower()
+                    )
                 )
             except Exception:
                 logger.info("  No specific results container detected, using page as-is")
@@ -663,8 +710,6 @@ def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Opt
     # ── Strategy 1: Find product card containers ──
     # Try multiple selector patterns (Biocompare may use any of these)
     card_selectors = [
-        "div.productRow",                   # Biocompare search results (camelCase!)
-        ".productList > div.module",        # Alternative: children of productList
         ".product-card",
         ".search-result-item",
         ".product-listing-item",
@@ -705,52 +750,26 @@ def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Opt
 def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dict]:
     """Parse structured product card element."""
     try:
-        # Product name — Biocompare puts it in <a> linking to the product page
+        # Product name
         name = ""
-        # Try Biocompare-specific product link first
-        for a in card.select("a[href]"):
-            href = a.get("href", "")
-            if "/Antibodies/" in href or "/antibodies/" in href:
-                candidate = a.get_text(strip=True)
-                if candidate and len(candidate) > 3 and "antibod" in candidate.lower():
-                    name = candidate
-                    break
-        # Fallback to generic heading/class selectors
-        if not name:
-            for sel in ["h3", "h4", "h5", ".product-name", ".product-title", "strong > a", "a > strong"]:
-                el = card.select_one(sel)
-                if el:
-                    name = el.get_text(strip=True)
-                    break
+        for sel in ["h3", "h4", "h5", ".product-name", ".product-title", "strong > a", "a > strong"]:
+            el = card.select_one(sel)
+            if el:
+                name = el.get_text(strip=True)
+                break
         if not name:
             first_link = card.select_one("a")
             name = first_link.get_text(strip=True) if first_link else ""
         if not name or len(name) < 3:
             return None
 
-        # Vendor — try CSS selectors first, then text-based extraction
+        # Vendor
         vendor = ""
         for sel in [".supplier", ".vendor", ".company-name", ".supplier-name"]:
             el = card.select_one(sel)
             if el:
                 vendor = el.get_text(strip=True)
                 break
-        if not vendor:
-            # Biocompare: vendor name appears between product name and "Applications:"
-            # in the card text. Extract it by finding text after the name, before labels.
-            card_text = card.get_text(separator="\n")
-            lines = [ln.strip() for ln in card_text.split("\n") if ln.strip()]
-            for idx, line in enumerate(lines):
-                if line == name and idx + 1 < len(lines):
-                    # The line right after the product name is typically the vendor
-                    candidate = lines[idx + 1]
-                    # Make sure it's not a field label
-                    if (candidate and not candidate.startswith(("Applications", "Reactivity",
-                        "Conjugate", "Quantity", "Reviews", "Compare", "Supplier", "$",
-                        "Sponsored", "Write"))
-                        and len(candidate) < 60):
-                        vendor = candidate
-                    break
 
         # Price
         price = 0.0
@@ -774,7 +793,7 @@ def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dic
         detail_url = ""
         for a in card.select("a[href]"):
             href = a.get("href", "")
-            if "/pfu/" in href or "/Antibodies/" in href or "/antibodies/" in href:
+            if "/pfu/" in href or "Antibod" in href:
                 detail_url = urljoin(BASE_URL, href)
                 break
 
@@ -1142,13 +1161,12 @@ class BiocompareScraper:
         max_pages: int = 3,
     ) -> dict:
         """
-        Scrape specific target antigens by searching Biocompare directly via URL.
+        Scrape specific target antigens by searching Biocompare's antibody page.
 
         For each target:
-          1. Builds a direct search URL with the target name as a query param
-             e.g. /Search-Antibodies/?search=ki67&said=0&soids=269752&vids=100436
-          2. Navigates directly to the results page (no DOM search bar interaction)
-          3. Parses product listings from the results
+          1. Navigates to biocompare.com/Search-Antibodies/ with type + vendor filters
+          2. Types the target name into the search bar (#txtSearch)
+          3. Submits and parses the results page
           4. Optionally follows pagination and detail links
 
         Args:
@@ -1170,6 +1188,10 @@ class BiocompareScraper:
         logger.info(f"  Type: {antibody_type}, Vendors: {vendor_vids or 'all'}")
         self.browser.start()
 
+        # Build the filtered search URL
+        filtered_url = build_search_url(antibody_type, vendor_vids)
+        logger.info(f"  Search URL: {filtered_url}")
+
         results_summary = {}
 
         try:
@@ -1180,20 +1202,8 @@ class BiocompareScraper:
 
                 logger.info(f"\n  🔍 Searching: {target_name}")
 
-                # Build a per-target URL with the search term baked in
-                target_url = build_search_url(
-                    antibody_type=antibody_type,
-                    vendor_vids=vendor_vids,
-                    search_term=target_name,
-                )
-                logger.info(f"  URL: {target_url}")
-
-                # Navigate directly to results (no search bar interaction)
-                html = self.browser.search_biocompare(
-                    query=target_name,
-                    search_url=target_url,
-                    wait_seconds=PAGE_LOAD_DELAY,
-                )
+                # Search using the Biocompare search bar on the filtered page
+                html = self.browser.search_biocompare(target_name, search_url=filtered_url)
 
                 if not html:
                     results_summary[target_name] = {"products": 0, "status": "search_failed"}

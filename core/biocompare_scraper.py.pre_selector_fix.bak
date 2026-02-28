@@ -388,10 +388,6 @@ class ChromeBrowser:
 
         options = Options()
 
-        # Don't wait for all resources (images, ads, trackers) to load.
-        # "eager" = ready after DOMContentLoaded, which is enough for scraping.
-        options.page_load_strategy = "eager"
-
         if self.headless:
             options.add_argument("--headless=new")
 
@@ -502,7 +498,6 @@ class ChromeBrowser:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
-        from selenium.common.exceptions import TimeoutException
 
         # Build the full URL with search term included
         if search_url:
@@ -519,11 +514,8 @@ class ChromeBrowser:
         try:
             # ── Navigate directly to search results ───────────────────
             logger.info(f"  Navigating to: {target_url}")
-            try:
-                self.driver.get(target_url)
-            except TimeoutException:
-                logger.warning("  Page load timed out — continuing with partial page")
-            time.sleep(wait_seconds + 2)  # Let remaining JS render
+            self.driver.get(target_url)
+            time.sleep(wait_seconds + 2)  # Let ASP.NET page render
 
             # ── Dismiss cookie consent / overlays if present ──────────
             for dismiss_sel in [
@@ -545,10 +537,12 @@ class ChromeBrowser:
             logger.info("  Waiting for results to load...")
             try:
                 WebDriverWait(self.driver, 10).until(
-                    lambda d: d.find_elements(By.CSS_SELECTOR,
-                        ".productList, .productRow, "
-                        ".product-listing, .search-result, table.results, "
-                        ".no-results, .product-item")
+                    lambda d: (
+                        d.find_elements(By.CSS_SELECTOR,
+                            ".product-listing, .search-result, table.results, "
+                            ".no-results, .product-item")
+                        or "results" in d.page_source.lower()
+                    )
                 )
             except Exception:
                 logger.info("  No specific results container detected, using page as-is")
@@ -663,8 +657,6 @@ def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Opt
     # ── Strategy 1: Find product card containers ──
     # Try multiple selector patterns (Biocompare may use any of these)
     card_selectors = [
-        "div.productRow",                   # Biocompare search results (camelCase!)
-        ".productList > div.module",        # Alternative: children of productList
         ".product-card",
         ".search-result-item",
         ".product-listing-item",
@@ -705,52 +697,26 @@ def parse_product_listing(html: str, antigen_name: str) -> tuple[list[dict], Opt
 def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dict]:
     """Parse structured product card element."""
     try:
-        # Product name — Biocompare puts it in <a> linking to the product page
+        # Product name
         name = ""
-        # Try Biocompare-specific product link first
-        for a in card.select("a[href]"):
-            href = a.get("href", "")
-            if "/Antibodies/" in href or "/antibodies/" in href:
-                candidate = a.get_text(strip=True)
-                if candidate and len(candidate) > 3 and "antibod" in candidate.lower():
-                    name = candidate
-                    break
-        # Fallback to generic heading/class selectors
-        if not name:
-            for sel in ["h3", "h4", "h5", ".product-name", ".product-title", "strong > a", "a > strong"]:
-                el = card.select_one(sel)
-                if el:
-                    name = el.get_text(strip=True)
-                    break
+        for sel in ["h3", "h4", "h5", ".product-name", ".product-title", "strong > a", "a > strong"]:
+            el = card.select_one(sel)
+            if el:
+                name = el.get_text(strip=True)
+                break
         if not name:
             first_link = card.select_one("a")
             name = first_link.get_text(strip=True) if first_link else ""
         if not name or len(name) < 3:
             return None
 
-        # Vendor — try CSS selectors first, then text-based extraction
+        # Vendor
         vendor = ""
         for sel in [".supplier", ".vendor", ".company-name", ".supplier-name"]:
             el = card.select_one(sel)
             if el:
                 vendor = el.get_text(strip=True)
                 break
-        if not vendor:
-            # Biocompare: vendor name appears between product name and "Applications:"
-            # in the card text. Extract it by finding text after the name, before labels.
-            card_text = card.get_text(separator="\n")
-            lines = [ln.strip() for ln in card_text.split("\n") if ln.strip()]
-            for idx, line in enumerate(lines):
-                if line == name and idx + 1 < len(lines):
-                    # The line right after the product name is typically the vendor
-                    candidate = lines[idx + 1]
-                    # Make sure it's not a field label
-                    if (candidate and not candidate.startswith(("Applications", "Reactivity",
-                        "Conjugate", "Quantity", "Reviews", "Compare", "Supplier", "$",
-                        "Sponsored", "Write"))
-                        and len(candidate) < 60):
-                        vendor = candidate
-                    break
 
         # Price
         price = 0.0
@@ -774,7 +740,7 @@ def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dic
         detail_url = ""
         for a in card.select("a[href]"):
             href = a.get("href", "")
-            if "/pfu/" in href or "/Antibodies/" in href or "/antibodies/" in href:
+            if "/pfu/" in href or "Antibod" in href:
                 detail_url = urljoin(BASE_URL, href)
                 break
 

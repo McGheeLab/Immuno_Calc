@@ -388,10 +388,6 @@ class ChromeBrowser:
 
         options = Options()
 
-        # Don't wait for all resources (images, ads, trackers) to load.
-        # "eager" = ready after DOMContentLoaded, which is enough for scraping.
-        options.page_load_strategy = "eager"
-
         if self.headless:
             options.add_argument("--headless=new")
 
@@ -502,7 +498,6 @@ class ChromeBrowser:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
-        from selenium.common.exceptions import TimeoutException
 
         # Build the full URL with search term included
         if search_url:
@@ -519,11 +514,8 @@ class ChromeBrowser:
         try:
             # ── Navigate directly to search results ───────────────────
             logger.info(f"  Navigating to: {target_url}")
-            try:
-                self.driver.get(target_url)
-            except TimeoutException:
-                logger.warning("  Page load timed out — continuing with partial page")
-            time.sleep(wait_seconds + 2)  # Let remaining JS render
+            self.driver.get(target_url)
+            time.sleep(wait_seconds + 2)  # Let ASP.NET page render
 
             # ── Dismiss cookie consent / overlays if present ──────────
             for dismiss_sel in [
@@ -738,8 +730,10 @@ def _parse_product_card(card, antigen_name: str, timestamp: str) -> Optional[dic
         if not vendor:
             # Biocompare: vendor name appears between product name and "Applications:"
             # in the card text. Extract it by finding text after the name, before labels.
-            card_text = card.get_text(separator="\n")
-            lines = [ln.strip() for ln in card_text.split("\n") if ln.strip()]
+            card_text = card.get_text(separator="
+")
+            lines = [ln.strip() for ln in card_text.split("
+") if ln.strip()]
             for idx, line in enumerate(lines):
                 if line == name and idx + 1 < len(lines):
                     # The line right after the product name is typically the vendor
