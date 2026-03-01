@@ -93,6 +93,7 @@ def render():
                 "Catalog #": it.catalog_no,
                 "Volume (µL)": f"{it.total_volume_ul:.0f}",
                 "Storage": it.storage_temp.value,
+                "Location": it.location,
                 "Expiry": str(it.expiry_date) if it.expiry_date else "N/A",
                 "Status": _get_status(it),
                 "id": it.id,
@@ -169,6 +170,49 @@ def _get_status(item) -> str:
     return " ".join(flags) if flags else "✅ OK"
 
 
+def _parse_location(location_str: str) -> dict:
+    """Parse a structured location string back into components.
+
+    Expected format: 'Freezer / Shelf / Box / Position'
+    Falls back gracefully if format doesn't match.
+    """
+    parts = {
+        "freezer": "",
+        "shelf": "",
+        "box": "",
+        "position": "",
+    }
+    if not location_str:
+        return parts
+
+    segments = [s.strip() for s in location_str.split("/")]
+    if len(segments) >= 1:
+        parts["freezer"] = segments[0]
+    if len(segments) >= 2:
+        parts["shelf"] = segments[1]
+    if len(segments) >= 3:
+        parts["box"] = segments[2]
+    if len(segments) >= 4:
+        parts["position"] = segments[3]
+
+    return parts
+
+
+def _build_location(freezer: str, shelf: str, box: str, position: str) -> str:
+    """Build a structured location string from components.
+
+    Format: 'Freezer / Shelf / Box / Position'
+    Omits trailing empty segments.
+    """
+    parts = [freezer.strip(), shelf.strip(), box.strip(), position.strip()]
+    # Remove trailing empty parts
+    while parts and not parts[-1]:
+        parts.pop()
+    if not parts:
+        return ""
+    return " / ".join(parts)
+
+
 def _render_detail_panel(db, item_id: str):
     from core.inventory import get_item, delete_item, increment_freeze_thaw, get_usage_log
 
@@ -198,7 +242,19 @@ def _render_detail_panel(db, item_id: str):
         st.write(f"**Volume:** {item.total_volume_ul:.0f} µL")
         st.write(f"**Concentration:** {item.concentration} mg/mL")
         st.write(f"**Storage:** {item.storage_temp.value}")
-        st.write(f"**Location:** {item.location}")
+        # Display structured location
+        loc = _parse_location(item.location)
+        if item.location:
+            st.write(f"**Location:** {item.location}")
+            if loc["freezer"]:
+                st.caption(
+                    f"  Freezer: {loc['freezer']}"
+                    + (f" → Shelf: {loc['shelf']}" if loc["shelf"] else "")
+                    + (f" → Box: {loc['box']}" if loc["box"] else "")
+                    + (f" → Pos: {loc['position']}" if loc["position"] else "")
+                )
+        else:
+            st.write("**Location:** Not set")
         st.write(f"**Expiry:** {item.expiry_date or 'N/A'}")
         st.write(f"**Received:** {item.date_received or 'N/A'}")
         st.write(f"**Freeze-Thaw Count:** {item.freeze_thaw_count}")
@@ -257,6 +313,9 @@ def _render_add_edit_form(db):
     st.divider()
     st.subheader("✏️ Edit Antibody" if existing else "➕ Add New Antibody")
 
+    # Pre-parse existing location into structured parts
+    existing_loc = _parse_location(existing.location if existing else "")
+
     with st.form("antibody_form"):
         # Identity
         st.markdown("**Identity**")
@@ -314,8 +373,35 @@ def _render_add_edit_form(db):
                 index=[s.value for s in StorageTemp].index(existing.storage_temp.value) if existing else 1,
             )
         with sc3:
-            location = st.text_input("Location", value=existing.location if existing else "")
             expiry = st.date_input("Expiry Date", value=existing.expiry_date if existing and existing.expiry_date else None)
+
+        # ─── Storage Location (structured) ──────────────────────
+        st.markdown("**Physical Storage Location**")
+        loc1, loc2, loc3, loc4 = st.columns(4)
+        with loc1:
+            loc_freezer = st.text_input(
+                "Freezer / Fridge",
+                value=existing_loc["freezer"],
+                placeholder="e.g., Freezer A, -80 Main",
+            )
+        with loc2:
+            loc_shelf = st.text_input(
+                "Shelf / Rack",
+                value=existing_loc["shelf"],
+                placeholder="e.g., Shelf 3, Rack B",
+            )
+        with loc3:
+            loc_box = st.text_input(
+                "Box / Drawer",
+                value=existing_loc["box"],
+                placeholder="e.g., Box 12, Drawer 2",
+            )
+        with loc4:
+            loc_position = st.text_input(
+                "Position / Slot",
+                value=existing_loc["position"],
+                placeholder="e.g., A5, Slot 7",
+            )
 
         # Dilutions
         st.markdown("**Working Dilutions**")
@@ -337,6 +423,9 @@ def _render_add_edit_form(db):
         if not target:
             st.error("Target antigen is required.")
             return
+
+        # Build combined location string
+        location = _build_location(loc_freezer, loc_shelf, loc_box, loc_position)
 
         item = InventoryItem(
             id=existing.id if existing else "",

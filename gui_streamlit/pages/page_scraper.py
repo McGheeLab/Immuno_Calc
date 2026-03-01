@@ -113,13 +113,40 @@ def render():
                                help="Hide Chrome window")
     with oc2:
         deep = st.checkbox("Deep scrape", value=False, key="scraper_deep",
-                           help="Also fetch each product's detail page for full specs")
+                           help="Also fetch each product's detail page for full specs "
+                                "(Clone, Concentration, Gene Name, Target, Research Area, etc.)")
     with oc3:
-        interactive = st.checkbox("Interactive", value=False, key="scraper_interactive",
-                                  help="Pause at each page for manual inspection")
+        fetch_prices = st.checkbox("Fetch prices", value=False, key="scraper_fetch_prices",
+                                    help="Follow supplier URLs (e.g., Abcam, BioLegend) to "
+                                         "get actual pricing. Enables deep scrape automatically.")
     with oc4:
         max_pages = st.number_input("Max pages/target", value=3, min_value=1, max_value=20,
                                     key="scraper_maxpages")
+
+    oc5, oc6, oc7 = st.columns(3)
+    with oc5:
+        interactive = st.checkbox("Interactive", value=False, key="scraper_interactive",
+                                  help="Pause at each page for manual inspection")
+    with oc6:
+        page_timeout = st.slider(
+            "Page timeout (seconds)",
+            min_value=15, max_value=120, value=60, step=5,
+            key="scraper_page_timeout",
+            help="How long Selenium waits for a page to finish loading. "
+                 "Biocompare loads many ad trackers — increase this if you "
+                 "see timeout errors. The scraper will still capture whatever "
+                 "loaded even if the timeout fires.",
+        )
+    with oc7:
+        st.caption("")  # spacer
+        st.caption(
+            f"⏱️ Timeout: **{page_timeout}s** — "
+            f"{'🟢 generous' if page_timeout >= 60 else '🟡 moderate' if page_timeout >= 30 else '🔴 tight'}"
+        )
+
+    if fetch_prices and not deep:
+        st.caption("ℹ️ **Fetch prices** automatically enables deep scrape "
+                   "(supplier URLs are found on product detail pages).")
 
     # Check if user wants to update existing entries
     update_existing = st.checkbox(
@@ -155,11 +182,18 @@ def render():
             return
 
         progress = st.empty()
+        scrape_modes = []
+        if deep or fetch_prices:
+            scrape_modes.append("deep scrape (detail pages)")
+        if fetch_prices:
+            scrape_modes.append("fetch supplier prices")
+        mode_str = " | ".join(scrape_modes) if scrape_modes else "search results only"
         progress.info(
             f"Opening Chrome...\n"
             f"Targets: {', '.join(target_list[:10])}\n"
             f"Type: {type_options[antibody_type]}\n"
-            f"Vendors: {len(selected_vids)} selected"
+            f"Vendors: {len(selected_vids)} selected\n"
+            f"Page timeout: {page_timeout}s | Mode: {mode_str}"
         )
 
         result = run_scrape(
@@ -170,14 +204,23 @@ def render():
             headless=headless,
             interactive=interactive,
             deep=deep,
+            fetch_prices=fetch_prices,
             max_pages=int(max_pages),
+            page_timeout=int(page_timeout),
         )
 
         progress.empty()
 
         if result["status"] == "ok":
             total = result.get("products", 0)
-            st.success(f"✅ Done! Found {total} products across {result.get('antigens', 0)} targets.")
+            extras = []
+            if deep or fetch_prices:
+                extras.append("full specs from detail pages")
+            if fetch_prices:
+                extras.append("supplier pricing")
+            extra_msg = f" (with {' + '.join(extras)})" if extras else ""
+            st.success(f"✅ Done! Found {total} products across "
+                       f"{result.get('antigens', 0)} targets{extra_msg}.")
 
             per_target = result.get("per_target", {})
             if per_target:
@@ -193,18 +236,23 @@ def render():
     st.divider()
     with st.expander("📖 Browse Scrape (by letter)"):
         st.caption("Scrape all antigens starting with a specific letter from Biocompare's browse pages.")
-        bc1, bc2, bc3 = st.columns(3)
+        bc1, bc2, bc3, bc4 = st.columns(4)
         with bc1:
             letter = st.selectbox("Letter", list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), key="scraper_letter")
         with bc2:
             letter_deep = st.checkbox("Deep", value=False, key="letter_deep")
         with bc3:
+            letter_fetch = st.checkbox("Fetch prices", value=False, key="letter_fetch",
+                                       help="Also fetch supplier pages for pricing")
+        with bc4:
             letter_max = st.number_input("Max pages", value=5, min_value=1, key="letter_max")
 
         if st.button("Scrape Letter", key="scraper_letter_run"):
             result = run_scrape(
                 mode="letter", letter=letter, headless=headless,
-                deep=letter_deep, max_pages=int(letter_max),
+                deep=letter_deep, fetch_prices=letter_fetch,
+                max_pages=int(letter_max),
+                page_timeout=int(page_timeout),
             )
             if result["status"] == "ok":
                 st.success(f"✅ {result.get('antigens', 0)} antigens, {result.get('products', 0)} products")
@@ -214,7 +262,8 @@ def render():
     with st.expander("🧪 Test Scrape"):
         st.caption("Quick test with 3 antigens to verify Selenium and parsers work.")
         if st.button("Run Test", key="scraper_test"):
-            result = run_scrape(mode="test", headless=headless, max_antigens=3)
+            result = run_scrape(mode="test", headless=headless, max_antigens=3,
+                                page_timeout=int(page_timeout))
             if result["status"] == "ok":
                 st.success(f"✅ Test passed: {result.get('products', 0)} products")
             else:

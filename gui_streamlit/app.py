@@ -62,12 +62,15 @@ PAGES = {
     "Inventory": "📦",
     "Catalog": "📚",
     "Panel Builder": "🧪",
-    "Price Search": "💰",
     "Scraper": "🌐",
     "Wishlist": "🛒",
     "Protocol": "📄",
     "Settings": "⚙️",
 }
+
+# Redirect legacy Price Search nav to Catalog
+if st.session_state.nav_page == "Price Search":
+    st.session_state.nav_page = "Catalog"
 
 # Top navigation bar
 cols = st.columns(len(PAGES))
@@ -101,9 +104,6 @@ elif page == "Catalog":
     render()
 elif page == "Panel Builder":
     from gui_streamlit.pages.page_panel_builder import render
-    render()
-elif page == "Price Search":
-    from gui_streamlit.pages.page_price_search import render
     render()
 elif page == "Scraper":
     from gui_streamlit.pages.page_scraper import render

@@ -60,7 +60,7 @@ def render():
                 ["Any", "Human", "Mouse", "Rat", "Rabbit"])
 
         sort_by = st.radio("Sort by",
-            ["Price (Low → High)", "Price (High → Low)", "Product Name"],
+            ["$/µg (Low → High)", "Price (Low → High)", "Price (High → Low)", "Product Name"],
             horizontal=True)
 
     # ─── Execute Search ─────────────────────────────────────────────
@@ -106,7 +106,9 @@ def render():
             filtered = [r for r in filtered if conjugate_filter.lower() in (r.conjugate or "").lower()]
 
         # Sort
-        if sort_by == "Price (Low → High)":
+        if sort_by == "$/µg (Low → High)":
+            filtered.sort(key=lambda r: r.price_per_ug if r.price_per_ug > 0 else 99999)
+        elif sort_by == "Price (Low → High)":
             filtered.sort(key=lambda r: r.price if r.price > 0 else 99999)
         elif sort_by == "Price (High → Low)":
             filtered.sort(key=lambda r: r.price if r.price > 0 else 0, reverse=True)
@@ -121,8 +123,9 @@ def render():
                     "Target": r.target,
                     "Vendor": r.vendor,
                     "Catalog #": r.catalog_no,
-                    "Price": f"${r.price:.2f}" if r.price > 0 else "Inquire",
+                    "Price": f"${r.price:.2f}" if r.price > 0 else "—",
                     "Size": r.package_size,
+                    "$/µg": f"${r.price_per_ug:.2f}" if r.price_per_ug > 0 else "—",
                     "Host": r.host_species,
                     "Conjugate": r.conjugate or "",
                     "Apps": ", ".join(r.validated_applications[:4]) if r.validated_applications else "",

@@ -111,6 +111,8 @@ def _search_local_catalog(
             catalog_no=row.get("catalog_no", ""),
             price=float(row.get("price", 0)),
             package_size=row.get("package_size", ""),
+            concentration=row.get("concentration", ""),
+            price_per_ug=float(row.get("price_per_ug", 0)),
             host_species=row.get("host_species", ""),
             isotype=row.get("isotype", ""),
             clonality=row.get("clonality", ""),

@@ -2,6 +2,7 @@
 gui_streamlit/pages/page_catalog.py — Local Biocompare Catalog Browser.
 
 Browse, search, sort, and filter all antibodies in the local database.
+Includes integrated wishlist functionality via row selection.
 """
 
 import streamlit as st
@@ -73,6 +74,9 @@ def render():
         if results:
             st.success(f"Found {len(results)} products")
 
+            # Store raw results for wishlist access
+            st.session_state["cat_results_raw"] = results
+
             # Build dataframe
             df = pd.DataFrame(results)
 
@@ -84,6 +88,7 @@ def render():
                 "catalog_no": "Catalog #",
                 "price": "Price",
                 "package_size": "Size",
+                "price_per_ug": "$/µg",
                 "host_species": "Host",
                 "conjugate": "Conjugate",
                 "applications": "Applications",
@@ -97,32 +102,49 @@ def render():
             # Format price
             if "Price" in df_display.columns:
                 df_display["Price"] = df_display["Price"].apply(
-                    lambda x: f"${x:.2f}" if x and x > 0 else "Inquire"
+                    lambda x: f"${x:.2f}" if x and x > 0 else "—"
+                )
+
+            # Format $/µg
+            if "$/µg" in df_display.columns:
+                df_display["$/µg"] = df_display["$/µg"].apply(
+                    lambda x: f"${x:.2f}" if x and x > 0 else "—"
                 )
 
             # Sort controls
-            sort_options = ["Target", "Vendor", "Price", "Product"]
+            sort_options = ["Target", "Vendor", "Price", "$/µg", "Product"]
             sort_avail = [s for s in sort_options if s in df_display.columns]
             sort_col = st.selectbox("Sort by", sort_avail, key="cat_sort")
             if sort_col:
-                ascending = sort_col != "Price"
+                ascending = sort_col not in ("Price",)
                 df_display = df_display.sort_values(sort_col, ascending=ascending, na_position="last")
 
-            st.dataframe(df_display, use_container_width=True, hide_index=True, height=500)
+            # ─── Interactive table with row selection ─────────────
+            st.caption("Select rows to add to wishlist:")
+            event = st.dataframe(
+                df_display,
+                use_container_width=True,
+                hide_index=True,
+                height=500,
+                on_select="rerun",
+                selection_mode="multi-row",
+            )
 
-            # ─── Add to Wishlist buttons ────────────────────────────
-            st.subheader("Add to Wishlist")
-            for i, row in enumerate(results[:30]):
-                cols = st.columns([4, 1])
-                with cols[0]:
-                    st.caption(
-                        f"{row.get('vendor', '')} — {row.get('product_name', '')[:60]} — "
-                        f"${row.get('price', 0):.2f}"
-                    )
-                with cols[1]:
-                    if st.button("🛒 Wishlist", key=f"cat_wish_{i}"):
-                        _add_to_wishlist(row)
-                        st.success(f"Added to wishlist!")
+            # ─── Add Selected to Wishlist ─────────────────────────
+            selected_rows = []
+            if event and event.selection and event.selection.rows:
+                selected_rows = event.selection.rows
+
+            if selected_rows:
+                st.info(f"**{len(selected_rows)}** product(s) selected")
+                if st.button("🛒 Add Selected to Wishlist", type="primary"):
+                    added = 0
+                    for idx in selected_rows:
+                        if idx < len(results):
+                            _add_to_wishlist(results[idx])
+                            added += 1
+                    st.success(f"Added {added} product(s) to wishlist!")
+                    st.rerun()
 
         else:
             st.info("No results found. Try different search terms or broaden filters.")

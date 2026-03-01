@@ -386,6 +386,8 @@ class PriceResult(BaseModel):
     reactivity: list[str] = Field(default_factory=list)
     price: float = Field(default=0)
     package_size: str = Field(default="")
+    concentration: str = Field(default="")
+    price_per_ug: float = Field(default=0, description="Normalized price per µg for comparison")
     url: str = Field(default="")
     review_score: float = Field(default=0)
     num_reviews: int = Field(default=0)

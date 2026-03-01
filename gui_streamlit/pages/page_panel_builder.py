@@ -204,7 +204,13 @@ def render():
             st.error("Please complete previous steps.")
             return
 
-        st.caption("For each target, select a primary antibody from inventory or mark for purchase.")
+        st.caption("For each target, select a primary antibody from inventory or choose from catalog recommendations.")
+
+        # ── Collect host species already used in panel for cross-reactivity checks ──
+        assigned_hosts = set()
+        for t in panel.targets:
+            if t.primary:
+                assigned_hosts.add(t.primary.host_species.value if hasattr(t.primary.host_species, 'value') else str(t.primary.host_species))
 
         # ── Refresh prices for panel targets ──
         target_names = [t.target_name for t in panel.targets if t.target_name]
@@ -237,7 +243,7 @@ def render():
 
                         if result["status"] == "ok":
                             total = result.get("products", 0)
-                            st.success(f"✅ Found {total} products. Check Price Search page for details.")
+                            st.success(f"✅ Found {total} products.")
                             for t, info in result.get("per_target", {}).items():
                                 icon = "✅" if info["status"] == "ok" and info["products"] > 0 else "⚠️"
                                 st.caption(f"  {icon} **{t}**: {info['products']} products")
@@ -273,7 +279,15 @@ def render():
                         target.inventory_item_id = inv_item.id
                         st.caption(f"Host: {inv_item.host_species.value} | Clone: {inv_item.clone_name} | Conjugate: {inv_item.conjugate}")
                 else:
-                    st.warning("Not in inventory — will need to purchase")
+                    st.warning("Not in inventory — showing catalog recommendations below")
+
+                    # ── Search catalog and show ranked recommendations ──
+                    _render_catalog_recommendations(
+                        target=target,
+                        panel=panel,
+                        assigned_hosts=assigned_hosts,
+                        target_index=i,
+                    )
 
                 # Manual entry option
                 with st.popover("✏️ Manual Entry"):
@@ -506,6 +520,236 @@ def render():
                     save_panel(session, panel)
                 st.success("Panel saved!")
 
+
+# ─── Catalog Recommendation Engine ──────────────────────────────────────────
+
+def _render_catalog_recommendations(target, panel, assigned_hosts: set, target_index: int):
+    """
+    Search the local catalog for the best antibody candidates for a target
+    that is not in inventory. Scores them by compatibility with the full
+    experimental setup and displays a ranked table with wishlist buttons.
+    """
+    from core.biocompare_scraper import get_catalog_db
+    from core.wishlist import add_to_wishlist
+    from gui_streamlit.shared import get_db_manager
+
+    catalog = get_catalog_db()
+    if not catalog:
+        st.caption("No catalog data available. Use the Scraper page to fetch antibodies first.")
+        return
+
+    # Search catalog for this target
+    results = catalog.search_products(
+        query="",
+        target=target.target_name,
+        host="",
+        application="IF",  # Prefer IF-validated antibodies
+        conjugate="",
+        reactivity=panel.sample_species.value if panel.sample_species else "",
+        max_results=50,
+    )
+
+    # If no results with strict IF filter, broaden the search
+    if not results:
+        results = catalog.search_products(
+            query="",
+            target=target.target_name,
+            host="",
+            application="",
+            conjugate="",
+            reactivity="",
+            max_results=50,
+        )
+
+    if not results:
+        st.caption(f"No catalog products found for **{target.target_name}**. "
+                   f"Try scraping Biocompare for this target.")
+        if st.button(f"🌐 Scrape {target.target_name}", key=f"scrape_tgt_{target_index}"):
+            st.session_state.scrape_targets = target.target_name
+            st.session_state.nav_page = "Scraper"
+            st.rerun()
+        return
+
+    # ── Score and rank candidates ──
+    scored = []
+    for r in results:
+        score, notes = _score_catalog_candidate(r, panel, assigned_hosts)
+        scored.append((r, score, notes))
+
+    # Sort by score descending (higher = better)
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Show top N
+    n_show = st.slider(
+        f"Recommendations for {target.target_name}",
+        min_value=3, max_value=min(20, len(scored)), value=min(5, len(scored)),
+        key=f"n_rec_{target_index}",
+    )
+    top_candidates = scored[:n_show]
+
+    # Build display dataframe
+    rec_rows = []
+    for r, score, notes in top_candidates:
+        rec_rows.append({
+            "Score": f"{score:.0f}",
+            "Product": (r.get("product_name", "") or "")[:60],
+            "Vendor": r.get("vendor", ""),
+            "Catalog #": r.get("catalog_no", ""),
+            "Host": r.get("host_species", ""),
+            "Conjugate": r.get("conjugate", "") or "Unconj.",
+            "Clonality": r.get("clonality", ""),
+            "Reactivity": r.get("reactivity", ""),
+            "Applications": r.get("applications", ""),
+            "Price": f"${r.get('price', 0):.2f}" if r.get("price", 0) and r.get("price", 0) > 0 else "—",
+            "Size": r.get("package_size", ""),
+            "$/µg": f"${r.get('price_per_ug', 0):.2f}" if r.get("price_per_ug", 0) and r.get("price_per_ug", 0) > 0 else "—",
+            "Fit Notes": notes,
+        })
+
+    rec_df = pd.DataFrame(rec_rows)
+
+    st.caption(f"**Top {len(rec_rows)} catalog recommendations** (scored by fit with your panel):")
+    event = st.dataframe(
+        rec_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        key=f"rec_table_{target_index}",
+    )
+
+    # ─── Add selected to wishlist ──────────────────────
+    selected_rows = []
+    if event and event.selection and event.selection.rows:
+        selected_rows = event.selection.rows
+
+    if selected_rows:
+        st.info(f"**{len(selected_rows)}** product(s) selected")
+        if st.button(f"🛒 Add to Wishlist", key=f"rec_wish_{target_index}", type="primary"):
+            db = get_db_manager()
+            added = 0
+            for idx in selected_rows:
+                if idx < len(top_candidates):
+                    r, _, _ = top_candidates[idx]
+                    with db.inventory_session() as session:
+                        add_to_wishlist(
+                            session,
+                            product_name=r.get("product_name", ""),
+                            target=r.get("antigen_name", "") or target.target_name,
+                            vendor=r.get("vendor", ""),
+                            catalog_no=r.get("catalog_no", ""),
+                            host_species=r.get("host_species", ""),
+                            isotype=r.get("isotype", ""),
+                            clonality=r.get("clonality", ""),
+                            conjugate=r.get("conjugate", ""),
+                            applications=r.get("applications", ""),
+                            reactivity=r.get("reactivity", ""),
+                            price=float(r.get("price", 0) or 0),
+                            package_size=r.get("package_size", ""),
+                            url=r.get("detail_url", "") or r.get("supplier_url", ""),
+                            notes=f"For panel: {panel.name} — target {target.target_name}",
+                            priority="high",
+                        )
+                    added += 1
+            st.success(f"Added {added} product(s) to wishlist!")
+            st.rerun()
+
+    # ─── Scoring legend ──────────────────────────────────
+    with st.popover("ℹ️ How are candidates scored?"):
+        st.markdown("""
+**Scoring criteria** (higher = better fit):
+
+- **Reactivity match** (+30): Antibody is validated for your sample species
+- **IF application** (+25): Validated for immunofluorescence
+- **Host species compatibility** (+20): Different host from other panel primaries (avoids secondary cross-reactivity)
+- **Monoclonal** (+10): Generally preferred for specificity
+- **Direct conjugate** (+5): Pre-conjugated, no secondary needed
+- **Price efficiency** (+0–10): Lower $/µg scores higher
+
+**Penalty flags:**
+- Same host as another panel primary (secondary cross-reactivity risk)
+- Not validated for IF
+- No reactivity data for your sample species
+        """)
+
+
+def _score_catalog_candidate(product: dict, panel, assigned_hosts: set) -> tuple[float, str]:
+    """
+    Score a catalog product for suitability in this panel.
+    Returns (score, human-readable notes string).
+
+    Scoring factors:
+    - Reactivity match with sample species
+    - IF application validation
+    - Host species compatibility (avoid secondary cross-reactivity)
+    - Clonality preference (monoclonal > polyclonal)
+    - Direct conjugate availability
+    - Price efficiency ($/µg)
+    """
+    score = 0.0
+    notes_parts = []
+
+    sample_species = panel.sample_species.value.lower() if panel.sample_species else ""
+    host = (product.get("host_species", "") or "").lower()
+    apps = (product.get("applications", "") or "").lower()
+    reactivity = (product.get("reactivity", "") or "").lower()
+    clonality = (product.get("clonality", "") or "").lower()
+    conjugate = (product.get("conjugate", "") or "").lower()
+    price_per_ug = product.get("price_per_ug", 0) or 0
+
+    # 1. Reactivity match (+30)
+    if sample_species and sample_species in reactivity:
+        score += 30
+        notes_parts.append("✅ Reactivity")
+    elif reactivity:
+        notes_parts.append("⚠️ Reactivity?")
+    else:
+        notes_parts.append("— No reactivity data")
+
+    # 2. IF application validated (+25)
+    if "if" in apps or "icc" in apps or "ihc" in apps:
+        score += 25
+        if "if" in apps:
+            notes_parts.append("✅ IF")
+        elif "icc" in apps:
+            score -= 5  # ICC is close but not identical
+            notes_parts.append("~ICC")
+    else:
+        notes_parts.append("⚠️ No IF")
+
+    # 3. Host species compatibility (+20)
+    host_title = host.title() if host else ""
+    if host_title and host_title not in assigned_hosts:
+        score += 20
+        notes_parts.append("✅ Host OK")
+    elif host_title and host_title in assigned_hosts:
+        score -= 10  # Penalty: secondary cross-reactivity risk
+        notes_parts.append("⚠️ Host conflict")
+
+    # 4. Clonality (+10 for monoclonal)
+    if "monoclonal" in clonality:
+        score += 10
+    elif "polyclonal" in clonality:
+        score += 3
+
+    # 5. Direct conjugate (+5)
+    if conjugate and conjugate not in ("unconjugated", "", "none"):
+        score += 5
+        notes_parts.append(f"Conj: {conjugate[:15]}")
+
+    # 6. Price efficiency (+0-10)
+    if price_per_ug > 0:
+        # Scale: $0-5/µg = +10, $5-20/µg = +5, >$20/µg = +0
+        if price_per_ug <= 5:
+            score += 10
+        elif price_per_ug <= 20:
+            score += 5
+        # else +0
+
+    return score, " | ".join(notes_parts)
+
+
+# ─── Spillover Heatmap ──────────────────────────────────────────────────────
 
 def _render_spillover_heatmap(targets, profile):
     """Render a Plotly spillover heatmap for assigned fluorophores."""

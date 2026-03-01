@@ -9,6 +9,31 @@ import streamlit as st
 import pandas as pd
 
 
+def _orm_to_dict(item) -> dict:
+    """Convert a WishlistItemORM to a plain dict while session is open."""
+    return {
+        "id": item.id,
+        "target": item.target,
+        "product_name": item.product_name,
+        "vendor": item.vendor,
+        "catalog_no": item.catalog_no,
+        "price": item.price,
+        "package_size": item.package_size,
+        "host_species": item.host_species,
+        "conjugate": item.conjugate,
+        "antibody_type": item.antibody_type,
+        "priority": item.priority,
+        "added_at": item.added_at,
+        "notes": item.notes,
+        "url": item.url,
+        "status": item.status,
+        "isotype": item.isotype,
+        "clonality": item.clonality,
+        "applications": item.applications,
+        "reactivity": item.reactivity,
+    }
+
+
 def render():
     from gui_streamlit.shared import get_db_manager
     from core.wishlist import (
@@ -37,28 +62,29 @@ def render():
     # ─── Wishlist Tab ───────────────────────────────────────────────
     with tab_wish:
         with db.inventory_session() as session:
-            items = get_all_wishlist(session, status="wishlist")
+            raw_items = get_all_wishlist(session, status="wishlist")
+            items = [_orm_to_dict(it) for it in raw_items]
 
         if not items:
             st.info(
-                "Wishlist is empty. Add antibodies from the **Price Search** "
-                "or **Catalog** pages."
+                "Wishlist is empty. Add antibodies from the "
+                "**Catalog** page or from the **Panel Builder**."
             )
         else:
             # Table
             df = pd.DataFrame([
                 {
-                    "Target": item.target,
-                    "Product": (item.product_name or "")[:60],
-                    "Vendor": item.vendor,
-                    "Catalog #": item.catalog_no,
-                    "Price": f"${item.price:.2f}" if item.price else "—",
-                    "Size": item.package_size,
-                    "Host": item.host_species,
-                    "Conjugate": item.conjugate,
-                    "Type": item.antibody_type,
-                    "Priority": item.priority,
-                    "Added": item.added_at.strftime("%Y-%m-%d") if item.added_at else "",
+                    "Target": item["target"],
+                    "Product": (item["product_name"] or "")[:60],
+                    "Vendor": item["vendor"],
+                    "Catalog #": item["catalog_no"],
+                    "Price": f"${item['price']:.2f}" if item["price"] else "—",
+                    "Size": item["package_size"],
+                    "Host": item["host_species"],
+                    "Conjugate": item["conjugate"],
+                    "Type": item["antibody_type"],
+                    "Priority": item["priority"],
+                    "Added": item["added_at"].strftime("%Y-%m-%d") if item["added_at"] else "",
                 }
                 for item in items
             ])
@@ -69,43 +95,43 @@ def render():
             for i, item in enumerate(items):
                 cols = st.columns([3, 1, 1, 1])
                 with cols[0]:
-                    st.caption(
-                        f"**{item.target}** — {item.vendor} — "
-                        f"{item.catalog_no or 'N/A'} — "
-                        f"${item.price:.2f}" if item.price else f"**{item.target}** — {item.vendor}"
-                    )
+                    label = f"**{item['target']}** — {item['vendor']} — {item['catalog_no'] or 'N/A'}"
+                    if item["price"]:
+                        label += f" — ${item['price']:.2f}"
+                    st.caption(label)
                 with cols[1]:
-                    if st.button("📦 Mark Ordered", key=f"order_{item.id}"):
+                    if st.button("📦 Mark Ordered", key=f"order_{item['id']}"):
                         with db.inventory_session() as session:
-                            update_status(session, item.id, "ordered")
+                            update_status(session, item["id"], "ordered")
                         st.success(f"Marked as ordered!")
                         st.rerun()
                 with cols[2]:
                     pri_opts = ["low", "normal", "high", "urgent"]
+                    current_pri = item["priority"] if item["priority"] in pri_opts else "normal"
                     new_pri = st.selectbox(
                         "Priority", pri_opts,
-                        index=pri_opts.index(item.priority) if item.priority in pri_opts else 1,
-                        key=f"pri_{item.id}",
+                        index=pri_opts.index(current_pri),
+                        key=f"pri_{item['id']}",
                         label_visibility="collapsed",
                     )
-                    if new_pri != item.priority:
+                    if new_pri != item["priority"]:
                         with db.inventory_session() as session:
-                            wi = session.query(
-                                __import__('core.database', fromlist=['WishlistItemORM']).WishlistItemORM
-                            ).filter_by(id=item.id).first()
+                            from core.database import WishlistItemORM
+                            wi = session.query(WishlistItemORM).filter_by(id=item["id"]).first()
                             if wi:
                                 wi.priority = new_pri
                         st.rerun()
                 with cols[3]:
-                    if st.button("🗑️", key=f"del_{item.id}"):
+                    if st.button("🗑️", key=f"del_{item['id']}"):
                         with db.inventory_session() as session:
-                            remove_from_wishlist(session, item.id)
+                            remove_from_wishlist(session, item["id"])
                         st.rerun()
 
     # ─── Ordered Tab ────────────────────────────────────────────────
     with tab_ordered:
         with db.inventory_session() as session:
-            ordered_items = get_all_wishlist(session, status="ordered")
+            raw_ordered = get_all_wishlist(session, status="ordered")
+            ordered_items = [_orm_to_dict(it) for it in raw_ordered]
 
         if not ordered_items:
             st.info("No items currently on order.")
@@ -117,13 +143,13 @@ def render():
 
             df = pd.DataFrame([
                 {
-                    "Target": item.target,
-                    "Product": (item.product_name or "")[:60],
-                    "Vendor": item.vendor,
-                    "Catalog #": item.catalog_no,
-                    "Price": f"${item.price:.2f}" if item.price else "—",
-                    "Size": item.package_size,
-                    "Added": item.added_at.strftime("%Y-%m-%d") if item.added_at else "",
+                    "Target": item["target"],
+                    "Product": (item["product_name"] or "")[:60],
+                    "Vendor": item["vendor"],
+                    "Catalog #": item["catalog_no"],
+                    "Price": f"${item['price']:.2f}" if item["price"] else "—",
+                    "Size": item["package_size"],
+                    "Added": item["added_at"].strftime("%Y-%m-%d") if item["added_at"] else "",
                 }
                 for item in ordered_items
             ])
@@ -133,13 +159,13 @@ def render():
                 cols = st.columns([3, 1, 1])
                 with cols[0]:
                     st.caption(
-                        f"**{item.target}** — {item.vendor} — "
-                        f"{item.catalog_no or 'N/A'}"
+                        f"**{item['target']}** — {item['vendor']} — "
+                        f"{item['catalog_no'] or 'N/A'}"
                     )
                 with cols[1]:
-                    if st.button("✅ Received → Inventory", key=f"recv_{item.id}", type="primary"):
+                    if st.button("✅ Received → Inventory", key=f"recv_{item['id']}", type="primary"):
                         with db.inventory_session() as session:
-                            inv_id = move_to_inventory(session, item.id)
+                            inv_id = move_to_inventory(session, item["id"])
                         if inv_id:
                             st.success(
                                 f"Moved to inventory! Go to the **Inventory** page "
@@ -149,9 +175,9 @@ def render():
                         else:
                             st.error("Could not move to inventory.")
                 with cols[2]:
-                    if st.button("← Back to Wishlist", key=f"unorder_{item.id}"):
+                    if st.button("← Back to Wishlist", key=f"unorder_{item['id']}"):
                         with db.inventory_session() as session:
-                            update_status(session, item.id, "wishlist")
+                            update_status(session, item["id"], "wishlist")
                         st.rerun()
 
     # ─── Manual Add Tab ─────────────────────────────────────────────
